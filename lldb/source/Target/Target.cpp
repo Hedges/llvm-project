@@ -1537,7 +1537,7 @@ bool Target::SetArchitecture(const ArchSpec &arch_spec, bool set_platform) {
                                                &search_paths, nullptr, nullptr);
 
     if (!error.Fail() && executable_sp) {
-      SetExecutableModule(executable_sp, eLoadDependentsYes);
+      SetExecutableModule(executable_sp, eLoadDependentsNo);
       return true;
     }
   }
@@ -2255,7 +2255,7 @@ void Target::ImageSearchPathsChanged(const PathMappingList &path_list,
   Target *target = (Target *)baton;
   ModuleSP exe_module_sp(target->GetExecutableModule());
   if (exe_module_sp)
-    target->SetExecutableModule(exe_module_sp, eLoadDependentsYes);
+    target->SetExecutableModule(exe_module_sp, eLoadDependentsNo);
 }
 
 llvm::Expected<TypeSystem &>

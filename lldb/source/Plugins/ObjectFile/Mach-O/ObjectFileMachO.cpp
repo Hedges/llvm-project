@@ -2350,7 +2350,8 @@ void ObjectFileMachO::ParseSymtab(Symtab &symtab) {
   ProcessSP process_sp(m_process_wp.lock());
   Process *process = process_sp.get();
 
-  uint32_t memory_module_load_level = eMemoryModuleLoadLevelComplete;
+  uint32_t memory_module_load_level =
+      eMemoryModuleLoadLevelMinimal; // eMemoryModuleLoadLevelComplete;
   bool is_shared_cache_image = IsSharedCacheBinary();
   bool is_local_shared_cache_image = is_shared_cache_image && !IsInMemory();
   SectionSP linkedit_section_sp(
@@ -2360,7 +2361,7 @@ void ObjectFileMachO::ParseSymtab(Symtab &symtab) {
       !is_local_shared_cache_image) {
     Target &target = process->GetTarget();
 
-    memory_module_load_level = target.GetMemoryModuleLoadLevel();
+    //memory_module_load_level = target.GetMemoryModuleLoadLevel();
 
     // Reading mach file from memory in a process or core file...
 
@@ -3725,6 +3726,8 @@ void ObjectFileMachO::ParseSymtab(Symtab &symtab) {
       const char *symbol_name_non_abi_mangled = nullptr;
       const char *symbol_name = nullptr;
 
+      char addr[256];
+
       if (have_strtab_data) {
         symbol_name = strtab_data.PeekCStr(nlist.n_strx);
 
@@ -3742,10 +3745,12 @@ void ObjectFileMachO::ParseSymtab(Symtab &symtab) {
           symbol_name = nullptr;
       } else {
         const addr_t str_addr = strtab_addr + nlist.n_strx;
-        Status str_error;
-        if (process->ReadCStringFromMemory(str_addr, memory_symbol_name,
-                                           str_error))
-          symbol_name = memory_symbol_name.c_str();
+        //Status str_error;
+        //if (process->ReadCStringFromMemory(str_addr, memory_symbol_name,
+        //                                   str_error))
+        //  symbol_name = memory_symbol_name.c_str();
+        sprintf(addr, "0x%x", str_addr);
+        symbol_name = addr;
       }
 
       SymbolType type = eSymbolTypeInvalid;

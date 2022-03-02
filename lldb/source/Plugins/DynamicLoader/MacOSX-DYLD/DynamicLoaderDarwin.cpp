@@ -151,9 +151,9 @@ ModuleSP DynamicLoaderDarwin::FindTargetModuleForImageInfo(
   // added to the target, don't let it be called for every one.
   if (!module_sp)
     module_sp = target.GetOrCreateModule(module_spec, false /* notify */);
-  if (!module_sp || module_sp->GetObjectFile() == nullptr)
-    module_sp = m_process->ReadModuleFromMemory(image_info.file_spec,
-                                                image_info.address);
+  //if (!module_sp || module_sp->GetObjectFile() == nullptr)
+  //  module_sp = m_process->ReadModuleFromMemory(image_info.file_spec,
+  //                                              image_info.address);
 
   if (did_create_ptr)
     *did_create_ptr = (bool)module_sp;
