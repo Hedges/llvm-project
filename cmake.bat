@@ -1,0 +1,1 @@
+c:\Tools\cmake\bin\cmake.exe -S llvm -B build -G "Visual Studio 17 2022" -DLLVM_ENABLE_PROJECTS="clang;lldb" -DPython3_INCLUDE_DIRS=C:\Users\jsyrylak\AppData\Local\Programs\Python\Python310\include -DPython3_LIBRARIES=C:\Users\jsyrylak\AppData\Local\Programs\Python\Python310
