@@ -159,7 +159,7 @@ Status TCPSocket::Connect(llvm::StringRef name) {
 
   std::vector<SocketAddress> addresses =
       SocketAddress::GetAddressInfo(host_port->hostname.c_str(), nullptr,
-                                    AF_UNSPEC, SOCK_STREAM, IPPROTO_TCP);
+                                    AF_INET, SOCK_STREAM, IPPROTO_TCP);
   for (SocketAddress &address : addresses) {
     error = CreateSocket(address.GetFamily());
     if (error.Fail())
