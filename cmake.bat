@@ -1,1 +1,2 @@
 c:\Tools\cmake\bin\cmake.exe -S llvm -B build -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;lldb" -DLLVM_ENABLE_RTTI="off" -DLLVM_BUILD_TESTS="off" -DLLVM_INCLUDE_TESTS="off" -DLLDB_ENABLE_PYTHON="off"
+rem Apple c:\Tools\cmake\bin\cmake.exe -S llvm -B build -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;lldb" -DLLVM_ENABLE_RTTI="off" -DLLVM_BUILD_TESTS="off" -DLLVM_INCLUDE_TESTS="off" -DLLDB_ENABLE_PYTHON="off" -DLLDB_ENABLE_SWIFT_SUPPORT="off"
