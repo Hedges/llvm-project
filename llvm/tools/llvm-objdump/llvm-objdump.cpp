@@ -128,12 +128,8 @@ namespace objdump_opt {
 #undef PREFIX
 
 static constexpr opt::OptTable::Info ObjdumpInfoTable[] = {
-#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
-               HELPTEXT, METAVAR, VALUES)                                      \
-  {PREFIX,          NAME,         HELPTEXT,                                    \
-   METAVAR,         OBJDUMP_##ID, opt::Option::KIND##Class,                    \
-   PARAM,           FLAGS,        OBJDUMP_##GROUP,                             \
-   OBJDUMP_##ALIAS, ALIASARGS,    VALUES},
+#define OPTION(...)                                                            \
+  LLVM_CONSTRUCT_OPT_INFO_WITH_ID_PREFIX(OBJDUMP_, __VA_ARGS__),
 #include "ObjdumpOpts.inc"
 #undef OPTION
 };
@@ -149,9 +145,7 @@ public:
 
 enum OtoolOptID {
   OTOOL_INVALID = 0, // This is not an option ID.
-#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
-               HELPTEXT, METAVAR, VALUES)                                      \
-  OTOOL_##ID,
+#define OPTION(...) LLVM_MAKE_OPT_ID_WITH_ID_PREFIX(OTOOL_, __VA_ARGS__),
 #include "OtoolOpts.inc"
 #undef OPTION
 };
@@ -165,12 +159,7 @@ namespace otool {
 #undef PREFIX
 
 static constexpr opt::OptTable::Info OtoolInfoTable[] = {
-#define OPTION(PREFIX, NAME, ID, KIND, GROUP, ALIAS, ALIASARGS, FLAGS, PARAM,  \
-               HELPTEXT, METAVAR, VALUES)                                      \
-  {PREFIX,        NAME,       HELPTEXT,                                        \
-   METAVAR,       OTOOL_##ID, opt::Option::KIND##Class,                        \
-   PARAM,         FLAGS,      OTOOL_##GROUP,                                   \
-   OTOOL_##ALIAS, ALIASARGS,  VALUES},
+#define OPTION(...) LLVM_CONSTRUCT_OPT_INFO_WITH_ID_PREFIX(OTOOL_, __VA_ARGS__),
 #include "OtoolOpts.inc"
 #undef OPTION
 };
@@ -245,15 +234,21 @@ StringSet<> objdump::FoundSectionSet;
 static StringRef ToolName;
 
 std::unique_ptr<BuildIDFetcher> BIDFetcher;
-ExitOnError ExitOnErr;
+
+Dumper::Dumper(const object::ObjectFile &O) : O(O) {
+  WarningHandler = [this](const Twine &Msg) {
+    if (Warnings.insert(Msg.str()).second)
+      reportWarning(Msg, this->O.getFileName());
+    return Error::success();
+  };
+}
 
 void Dumper::reportUniqueWarning(Error Err) {
   reportUniqueWarning(toString(std::move(Err)));
 }
 
 void Dumper::reportUniqueWarning(const Twine &Msg) {
-  if (Warnings.insert(StringRef(Msg.str())).second)
-    reportWarning(Msg, O.getFileName());
+  cantFail(WarningHandler(Msg));
 }
 
 static Expected<std::unique_ptr<Dumper>> createDumper(const ObjectFile &Obj) {

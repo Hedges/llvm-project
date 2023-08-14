@@ -2450,9 +2450,16 @@ static bool CheckEvaluationResult(CheckEvaluationResultKind CERK,
     if (const CXXRecordDecl *CD = dyn_cast<CXXRecordDecl>(RD)) {
       unsigned BaseIndex = 0;
       for (const CXXBaseSpecifier &BS : CD->bases()) {
-        if (!CheckEvaluationResult(CERK, Info, DiagLoc, BS.getType(),
-                                   Value.getStructBase(BaseIndex), Kind,
-                                   /*SubobjectDecl=*/nullptr, CheckedTemps))
+        const APValue &BaseValue = Value.getStructBase(BaseIndex);
+        if (!BaseValue.hasValue()) {
+          SourceLocation TypeBeginLoc = BS.getBaseTypeLoc();
+          Info.FFDiag(TypeBeginLoc, diag::note_constexpr_uninitialized_base)
+              << BS.getType() << SourceRange(TypeBeginLoc, BS.getEndLoc());
+          return false;
+        }
+        if (!CheckEvaluationResult(CERK, Info, DiagLoc, BS.getType(), BaseValue,
+                                   Kind, /*SubobjectDecl=*/nullptr,
+                                   CheckedTemps))
           return false;
         ++BaseIndex;
       }
@@ -2798,9 +2805,9 @@ static bool CheckedIntArithmetic(EvalInfo &Info, const Expr *E,
 }
 
 /// Perform the given binary integer operation.
-static bool handleIntIntBinOp(EvalInfo &Info, const Expr *E, const APSInt &LHS,
-                              BinaryOperatorKind Opcode, APSInt RHS,
-                              APSInt &Result) {
+static bool handleIntIntBinOp(EvalInfo &Info, const BinaryOperator *E,
+                              const APSInt &LHS, BinaryOperatorKind Opcode,
+                              APSInt RHS, APSInt &Result) {
   bool HandleOverflowResult = true;
   switch (Opcode) {
   default:
@@ -2821,7 +2828,8 @@ static bool handleIntIntBinOp(EvalInfo &Info, const Expr *E, const APSInt &LHS,
   case BO_Div:
   case BO_Rem:
     if (RHS == 0) {
-      Info.FFDiag(E, diag::note_expr_divide_by_zero);
+      Info.FFDiag(E, diag::note_expr_divide_by_zero)
+          << E->getRHS()->getSourceRange();
       return false;
     }
     // Check for overflow case: INT_MIN / -1 or INT_MIN % -1. APSInt supports
@@ -12116,11 +12124,21 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
   case Builtin::BI__builtin_clz:
   case Builtin::BI__builtin_clzl:
   case Builtin::BI__builtin_clzll:
-  case Builtin::BI__builtin_clzs: {
+  case Builtin::BI__builtin_clzs:
+  case Builtin::BI__lzcnt16: // Microsoft variants of count leading-zeroes
+  case Builtin::BI__lzcnt:
+  case Builtin::BI__lzcnt64: {
     APSInt Val;
     if (!EvaluateInteger(E->getArg(0), Val, Info))
       return false;
-    if (!Val)
+
+    // When the argument is 0, the result of GCC builtins is undefined, whereas
+    // for Microsoft intrinsics, the result is the bit-width of the argument.
+    bool ZeroIsUndefined = BuiltinOp != Builtin::BI__lzcnt16 &&
+                           BuiltinOp != Builtin::BI__lzcnt &&
+                           BuiltinOp != Builtin::BI__lzcnt64;
+
+    if (ZeroIsUndefined && !Val)
       return Error(E);
 
     return Success(Val.countl_zero(), E);
@@ -12259,7 +12277,10 @@ bool IntExprEvaluator::VisitBuiltinCallExpr(const CallExpr *E,
 
   case Builtin::BI__builtin_popcount:
   case Builtin::BI__builtin_popcountl:
-  case Builtin::BI__builtin_popcountll: {
+  case Builtin::BI__builtin_popcountll:
+  case Builtin::BI__popcnt16: // Microsoft variants of popcount
+  case Builtin::BI__popcnt:
+  case Builtin::BI__popcnt64: {
     APSInt Val;
     if (!EvaluateInteger(E->getArg(0), Val, Info))
       return false;

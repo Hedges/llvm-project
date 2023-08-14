@@ -238,7 +238,7 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
 }
 
 void Driver::setDriverMode(StringRef Value) {
-  static const std::string OptName =
+  static StringRef OptName =
       getOpts().getOption(options::OPT_driver_mode).getPrefixedName();
   if (auto M = llvm::StringSwitch<std::optional<DriverMode>>(Value)
                    .Case("gcc", GCCMode)
@@ -2648,6 +2648,8 @@ void Driver::BuildInputs(const ToolChain &TC, DerivedArgList &Args,
         if (memcmp(Value, "-", 2) == 0) {
           if (IsFlangMode()) {
             Ty = types::TY_Fortran;
+          } else if (IsDXCMode()) {
+            Ty = types::TY_HLSL;
           } else {
             // If running with -E, treat as a C input (this changes the
             // builtin macros, for example). This may be overridden by -ObjC
@@ -6554,7 +6556,7 @@ bool clang::driver::willEmitRemarks(const ArgList &Args) {
 
 llvm::StringRef clang::driver::getDriverMode(StringRef ProgName,
                                              ArrayRef<const char *> Args) {
-  static const std::string OptName =
+  static StringRef OptName =
       getDriverOptTable().getOption(options::OPT_driver_mode).getPrefixedName();
   llvm::StringRef Opt;
   for (StringRef Arg : Args) {
