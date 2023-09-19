@@ -1353,10 +1353,9 @@ define signext i64 @vpwreduce_add_nxv1i32(i64 signext %s, <vscale x 1 x i32> %v,
 ; RV32-NEXT:    vlse64.v v9, (a0), zero
 ; RV32-NEXT:    vsetvli zero, a2, e32, mf2, ta, ma
 ; RV32-NEXT:    vwredsum.vs v9, v8, v9, v0.t
-; RV32-NEXT:    vsetvli zero, zero, e64, m1, ta, ma
+; RV32-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV32-NEXT:    vmv.x.s a0, v9
 ; RV32-NEXT:    li a1, 32
-; RV32-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV32-NEXT:    vsrl.vx v8, v9, a1
 ; RV32-NEXT:    vmv.x.s a1, v8
 ; RV32-NEXT:    addi sp, sp, 16
@@ -1388,10 +1387,9 @@ define signext i64 @vpwreduce_uadd_nxv1i32(i64 signext %s, <vscale x 1 x i32> %v
 ; RV32-NEXT:    vlse64.v v9, (a0), zero
 ; RV32-NEXT:    vsetvli zero, a2, e32, mf2, ta, ma
 ; RV32-NEXT:    vwredsum.vs v9, v8, v9, v0.t
-; RV32-NEXT:    vsetvli zero, zero, e64, m1, ta, ma
+; RV32-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV32-NEXT:    vmv.x.s a0, v9
 ; RV32-NEXT:    li a1, 32
-; RV32-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV32-NEXT:    vsrl.vx v8, v9, a1
 ; RV32-NEXT:    vmv.x.s a1, v8
 ; RV32-NEXT:    addi sp, sp, 16
@@ -1709,7 +1707,7 @@ define signext i64 @vwpreduce_add_nxv2i32(i64 signext %s, <vscale x 2 x i32> %v,
 ; RV64-NEXT:    vmv.s.x v9, a0
 ; RV64-NEXT:    vsetvli zero, a1, e32, m1, ta, ma
 ; RV64-NEXT:    vwredsum.vs v9, v8, v9, v0.t
-; RV64-NEXT:    vsetivli zero, 0, e64, m1, ta, ma
+; RV64-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV64-NEXT:    vmv.x.s a0, v9
 ; RV64-NEXT:    ret
   %e = sext <vscale x 2 x i32> %v to <vscale x 2 x i64>
@@ -1743,7 +1741,7 @@ define signext i64 @vwpreduce_uadd_nxv2i32(i64 signext %s, <vscale x 2 x i32> %v
 ; RV64-NEXT:    vmv.s.x v9, a0
 ; RV64-NEXT:    vsetvli zero, a1, e32, m1, ta, ma
 ; RV64-NEXT:    vwredsum.vs v9, v8, v9, v0.t
-; RV64-NEXT:    vsetivli zero, 0, e64, m1, ta, ma
+; RV64-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV64-NEXT:    vmv.x.s a0, v9
 ; RV64-NEXT:    ret
   %e = sext <vscale x 2 x i32> %v to <vscale x 2 x i64>
@@ -2049,7 +2047,7 @@ define signext i64 @vpwreduce_add_nxv4i32(i64 signext %s, <vscale x 4 x i32> %v,
 ; RV64-NEXT:    vmv.s.x v10, a0
 ; RV64-NEXT:    vsetvli zero, a1, e32, m2, ta, ma
 ; RV64-NEXT:    vwredsum.vs v10, v8, v10, v0.t
-; RV64-NEXT:    vsetivli zero, 0, e64, m1, ta, ma
+; RV64-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV64-NEXT:    vmv.x.s a0, v10
 ; RV64-NEXT:    ret
   %e = sext <vscale x 4 x i32> %v to <vscale x 4 x i64>
@@ -2083,7 +2081,7 @@ define signext i64 @vpwreduce_uadd_nxv4i32(i64 signext %s, <vscale x 4 x i32> %v
 ; RV64-NEXT:    vmv.s.x v10, a0
 ; RV64-NEXT:    vsetvli zero, a1, e32, m2, ta, ma
 ; RV64-NEXT:    vwredsumu.vs v10, v8, v10, v0.t
-; RV64-NEXT:    vsetivli zero, 0, e64, m1, ta, ma
+; RV64-NEXT:    vsetivli zero, 1, e64, m1, ta, ma
 ; RV64-NEXT:    vmv.x.s a0, v10
 ; RV64-NEXT:    ret
   %e = zext <vscale x 4 x i32> %v to <vscale x 4 x i64>

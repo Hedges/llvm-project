@@ -1128,6 +1128,8 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
           REVERTIBLE_TYPE_TRAIT(__is_unsigned);
           REVERTIBLE_TYPE_TRAIT(__is_void);
           REVERTIBLE_TYPE_TRAIT(__is_volatile);
+          REVERTIBLE_TYPE_TRAIT(__reference_binds_to_temporary);
+          REVERTIBLE_TYPE_TRAIT(__reference_constructs_from_temporary);
 #define TRANSFORM_TYPE_TRAIT_DEF(_, Trait)                                     \
   REVERTIBLE_TYPE_TRAIT(RTT_JOIN(__, Trait));
 #include "clang/Basic/TransformTypeTraits.def"
@@ -3515,7 +3517,7 @@ bool Parser::ParseExpressionList(SmallVectorImpl<Expr *> &Exprs,
       Expr = Actions.ActOnPackExpansion(Expr.get(), ConsumeToken());
     else if (Tok.is(tok::code_completion)) {
       // There's nothing to suggest in here as we parsed a full expression.
-      // Instead fail and propogate the error since caller might have something
+      // Instead fail and propagate the error since caller might have something
       // the suggest, e.g. signature help in function call. Note that this is
       // performed before pushing the \p Expr, so that signature help can report
       // current argument correctly.

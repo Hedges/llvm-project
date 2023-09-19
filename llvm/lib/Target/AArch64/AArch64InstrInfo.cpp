@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "AArch64ExpandImm.h"
 #include "AArch64InstrInfo.h"
 #include "AArch64FrameLowering.h"
 #include "AArch64MachineFunctionInfo.h"
@@ -29,6 +30,7 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -42,7 +44,6 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/MathExtras.h"
@@ -69,6 +70,10 @@ static cl::opt<unsigned> CBZDisplacementBits(
 static cl::opt<unsigned>
     BCCDisplacementBits("aarch64-bcc-offset-bits", cl::Hidden, cl::init(19),
                         cl::desc("Restrict range of Bcc instructions (DEBUG)"));
+
+static cl::opt<unsigned>
+    BDisplacementBits("aarch64-b-offset-bits", cl::Hidden, cl::init(26),
+                      cl::desc("Restrict range of B instructions (DEBUG)"));
 
 AArch64InstrInfo::AArch64InstrInfo(const AArch64Subtarget &STI)
     : AArch64GenInstrInfo(AArch64::ADJCALLSTACKDOWN, AArch64::ADJCALLSTACKUP,
@@ -203,7 +208,7 @@ static unsigned getBranchDisplacementBits(unsigned Opc) {
   default:
     llvm_unreachable("unexpected opcode!");
   case AArch64::B:
-    return 64;
+    return BDisplacementBits;
   case AArch64::TBNZW:
   case AArch64::TBZW:
   case AArch64::TBNZX:
@@ -246,6 +251,78 @@ AArch64InstrInfo::getBranchDestBlock(const MachineInstr &MI) const {
   case AArch64::Bcc:
     return MI.getOperand(1).getMBB();
   }
+}
+
+void AArch64InstrInfo::insertIndirectBranch(MachineBasicBlock &MBB,
+                                            MachineBasicBlock &NewDestBB,
+                                            MachineBasicBlock &RestoreBB,
+                                            const DebugLoc &DL,
+                                            int64_t BrOffset,
+                                            RegScavenger *RS) const {
+  assert(RS && "RegScavenger required for long branching");
+  assert(MBB.empty() &&
+         "new block should be inserted for expanding unconditional branch");
+  assert(MBB.pred_size() == 1);
+  assert(RestoreBB.empty() &&
+         "restore block should be inserted for restoring clobbered registers");
+
+  auto buildIndirectBranch = [&](Register Reg, MachineBasicBlock &DestBB) {
+    // Offsets outside of the signed 33-bit range are not supported for ADRP +
+    // ADD.
+    if (!isInt<33>(BrOffset))
+      report_fatal_error(
+          "Branch offsets outside of the signed 33-bit range not supported");
+
+    BuildMI(MBB, MBB.end(), DL, get(AArch64::ADRP), Reg)
+        .addSym(DestBB.getSymbol(), AArch64II::MO_PAGE);
+    BuildMI(MBB, MBB.end(), DL, get(AArch64::ADDXri), Reg)
+        .addReg(Reg)
+        .addSym(DestBB.getSymbol(), AArch64II::MO_PAGEOFF | AArch64II::MO_NC)
+        .addImm(0);
+    BuildMI(MBB, MBB.end(), DL, get(AArch64::BR)).addReg(Reg);
+  };
+
+  RS->enterBasicBlockEnd(MBB);
+  // If X16 is unused, we can rely on the linker to insert a range extension
+  // thunk if NewDestBB is out of range of a single B instruction.
+  constexpr Register Reg = AArch64::X16;
+  if (!RS->isRegUsed(Reg)) {
+    insertUnconditionalBranch(MBB, &NewDestBB, DL);
+    RS->setRegUsed(Reg);
+    return;
+  }
+
+  // If there's a free register and it's worth inflating the code size,
+  // manually insert the indirect branch.
+  Register Scavenged = RS->FindUnusedReg(&AArch64::GPR64RegClass);
+  if (Scavenged != AArch64::NoRegister &&
+      MBB.getSectionID() == MBBSectionID::ColdSectionID) {
+    buildIndirectBranch(Scavenged, NewDestBB);
+    RS->setRegUsed(Scavenged);
+    return;
+  }
+
+  // Note: Spilling X16 briefly moves the stack pointer, making it incompatible
+  // with red zones.
+  AArch64FunctionInfo *AFI = MBB.getParent()->getInfo<AArch64FunctionInfo>();
+  if (!AFI || AFI->hasRedZone().value_or(true))
+    report_fatal_error(
+        "Unable to insert indirect branch inside function that has red zone");
+
+  // Otherwise, spill X16 and defer range extension to the linker.
+  BuildMI(MBB, MBB.end(), DL, get(AArch64::STRXpre))
+      .addReg(AArch64::SP, RegState::Define)
+      .addReg(Reg)
+      .addReg(AArch64::SP)
+      .addImm(-16);
+
+  BuildMI(MBB, MBB.end(), DL, get(AArch64::B)).addMBB(&RestoreBB);
+
+  BuildMI(RestoreBB, RestoreBB.end(), DL, get(AArch64::LDRXpost))
+      .addReg(AArch64::SP, RegState::Define)
+      .addReg(Reg, RegState::Define)
+      .addReg(AArch64::SP)
+      .addImm(16);
 }
 
 // Branch analysis.
@@ -301,10 +378,9 @@ bool AArch64InstrInfo::analyzeBranch(MachineBasicBlock &MBB,
         // Return now the only terminator is an unconditional branch.
         TBB = LastInst->getOperand(0).getMBB();
         return false;
-      } else {
-        SecondLastInst = &*I;
-        SecondLastOpc = SecondLastInst->getOpcode();
       }
+      SecondLastInst = &*I;
+      SecondLastOpc = SecondLastInst->getOpcode();
     }
   }
 
@@ -327,10 +403,9 @@ bool AArch64InstrInfo::analyzeBranch(MachineBasicBlock &MBB,
         return false;
       }
       return true; // Can't handle indirect branch.
-    } else {
-      SecondLastInst = &*I;
-      SecondLastOpc = SecondLastInst->getOpcode();
     }
+    SecondLastInst = &*I;
+    SecondLastOpc = SecondLastInst->getOpcode();
   }
 
   // If there are three terminators, we don't know what sort of block this is.
@@ -2159,6 +2234,7 @@ unsigned AArch64InstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
   case AArch64::LDRSui:
   case AArch64::LDRDui:
   case AArch64::LDRQui:
+  case AArch64::LDR_PXI:
     if (MI.getOperand(0).getSubReg() == 0 && MI.getOperand(1).isFI() &&
         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() == 0) {
       FrameIndex = MI.getOperand(1).getIndex();
@@ -2182,7 +2258,6 @@ unsigned AArch64InstrInfo::isStoreToStackSlot(const MachineInstr &MI,
   case AArch64::STRSui:
   case AArch64::STRDui:
   case AArch64::STRQui:
-  case AArch64::LDR_PXI:
   case AArch64::STR_PXI:
     if (MI.getOperand(0).getSubReg() == 0 && MI.getOperand(1).isFI() &&
         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() == 0) {
@@ -3604,8 +3679,10 @@ void AArch64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   }
 
   // Copy a Z register pair by copying the individual sub-registers.
-  if (AArch64::ZPR2RegClass.contains(DestReg) &&
-      AArch64::ZPR2RegClass.contains(SrcReg)) {
+  if ((AArch64::ZPR2RegClass.contains(DestReg) ||
+       AArch64::ZPR2StridedOrContiguousRegClass.contains(DestReg)) &&
+      (AArch64::ZPR2RegClass.contains(SrcReg) ||
+       AArch64::ZPR2StridedOrContiguousRegClass.contains(SrcReg))) {
     assert(Subtarget.hasSVEorSME() && "Unexpected SVE register.");
     static const unsigned Indices[] = {AArch64::zsub0, AArch64::zsub1};
     copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, AArch64::ORR_ZZZ,
@@ -3625,8 +3702,10 @@ void AArch64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   }
 
   // Copy a Z register quad by copying the individual sub-registers.
-  if (AArch64::ZPR4RegClass.contains(DestReg) &&
-      AArch64::ZPR4RegClass.contains(SrcReg)) {
+  if ((AArch64::ZPR4RegClass.contains(DestReg) ||
+       AArch64::ZPR4StridedOrContiguousRegClass.contains(DestReg)) &&
+      (AArch64::ZPR4RegClass.contains(SrcReg) ||
+       AArch64::ZPR4StridedOrContiguousRegClass.contains(SrcReg))) {
     assert(Subtarget.hasSVEorSME() && "Unexpected SVE register.");
     static const unsigned Indices[] = {AArch64::zsub0, AArch64::zsub1,
                                        AArch64::zsub2, AArch64::zsub3};
@@ -3892,7 +3971,8 @@ void AArch64InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
     if (AArch64::FPR16RegClass.hasSubClassEq(RC))
       Opc = AArch64::STRHui;
     else if (AArch64::PPRRegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register store without SVE store instructions");
       Opc = AArch64::STR_PXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -3936,7 +4016,8 @@ void AArch64InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
                               AArch64::sube64, AArch64::subo64, FI, MMO);
       return;
     } else if (AArch64::ZPRRegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register store without SVE store instructions");
       Opc = AArch64::STR_ZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -3957,8 +4038,10 @@ void AArch64InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
       assert(Subtarget.hasNEON() && "Unexpected register store without NEON");
       Opc = AArch64::ST1Twov2d;
       Offset = false;
-    } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC) ||
+               AArch64::ZPR2StridedOrContiguousRegClass.hasSubClassEq(RC)) {
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register store without SVE store instructions");
       Opc = AArch64::STR_ZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -3969,7 +4052,8 @@ void AArch64InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
       Opc = AArch64::ST1Threev2d;
       Offset = false;
     } else if (AArch64::ZPR3RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register store without SVE store instructions");
       Opc = AArch64::STR_ZZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -3979,8 +4063,10 @@ void AArch64InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
       assert(Subtarget.hasNEON() && "Unexpected register store without NEON");
       Opc = AArch64::ST1Fourv2d;
       Offset = false;
-    } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC) ||
+               AArch64::ZPR4StridedOrContiguousRegClass.hasSubClassEq(RC)) {
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register store without SVE store instructions");
       Opc = AArch64::STR_ZZZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4048,7 +4134,8 @@ void AArch64InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
     if (AArch64::FPR16RegClass.hasSubClassEq(RC))
       Opc = AArch64::LDRHui;
     else if (AArch64::PPRRegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register load without SVE load instructions");
       Opc = AArch64::LDR_PXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4092,7 +4179,8 @@ void AArch64InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
                                AArch64::subo64, FI, MMO);
       return;
     } else if (AArch64::ZPRRegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register load without SVE load instructions");
       Opc = AArch64::LDR_ZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4113,8 +4201,10 @@ void AArch64InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
       assert(Subtarget.hasNEON() && "Unexpected register load without NEON");
       Opc = AArch64::LD1Twov2d;
       Offset = false;
-    } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC) ||
+               AArch64::ZPR2StridedOrContiguousRegClass.hasSubClassEq(RC)) {
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register load without SVE load instructions");
       Opc = AArch64::LDR_ZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4125,7 +4215,8 @@ void AArch64InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
       Opc = AArch64::LD1Threev2d;
       Offset = false;
     } else if (AArch64::ZPR3RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register load without SVE load instructions");
       Opc = AArch64::LDR_ZZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4135,8 +4226,10 @@ void AArch64InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
       assert(Subtarget.hasNEON() && "Unexpected register load without NEON");
       Opc = AArch64::LD1Fourv2d;
       Offset = false;
-    } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC)) {
-      assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC) ||
+               AArch64::ZPR4StridedOrContiguousRegClass.hasSubClassEq(RC)) {
+      assert(Subtarget.hasSVEorSME() &&
+             "Unexpected register load without SVE load instructions");
       Opc = AArch64::LDR_ZZZZXI;
       StackID = TargetStackID::ScalableVector;
     }
@@ -4827,6 +4920,12 @@ bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
   return false;
 }
 
+void AArch64InstrInfo::insertNoop(MachineBasicBlock &MBB,
+                                  MachineBasicBlock::iterator MI) const {
+  DebugLoc DL;
+  BuildMI(MBB, MI, DL, get(AArch64::HINT)).addImm(0);
+}
+
 MCInst AArch64InstrInfo::getNop() const {
   return MCInstBuilder(AArch64::HINT).addImm(0);
 }
@@ -5443,8 +5542,8 @@ static bool getFNEGPatterns(MachineInstr &Root,
   auto Match = [&](unsigned Opcode, MachineCombinerPattern Pattern) -> bool {
     MachineOperand &MO = Root.getOperand(1);
     MachineInstr *MI = MRI.getUniqueVRegDef(MO.getReg());
-    if (MI != nullptr && MRI.hasOneNonDBGUse(MI->getOperand(0).getReg()) &&
-        (MI->getOpcode() == Opcode) &&
+    if (MI != nullptr && (MI->getOpcode() == Opcode) &&
+        MRI.hasOneNonDBGUse(MI->getOperand(0).getReg()) &&
         Root.getFlag(MachineInstr::MIFlag::FmContract) &&
         Root.getFlag(MachineInstr::MIFlag::FmNsz) &&
         MI->getFlag(MachineInstr::MIFlag::FmContract) &&
@@ -8324,6 +8423,55 @@ describeORRLoadedValue(const MachineInstr &MI, Register DescribedReg,
   return std::nullopt;
 }
 
+bool AArch64InstrInfo::isFunctionSafeToSplit(const MachineFunction &MF) const {
+  // Functions cannot be split to different sections on AArch64 if they have
+  // a red zone. This is because relaxing a cross-section branch may require
+  // incrementing the stack pointer to spill a register, which would overwrite
+  // the red zone.
+  if (MF.getInfo<AArch64FunctionInfo>()->hasRedZone().value_or(true))
+    return false;
+
+  return TargetInstrInfo::isFunctionSafeToSplit(MF);
+}
+
+bool AArch64InstrInfo::isMBBSafeToSplitToCold(
+    const MachineBasicBlock &MBB) const {
+  // Asm Goto blocks can contain conditional branches to goto labels, which can
+  // get moved out of range of the branch instruction.
+  auto isAsmGoto = [](const MachineInstr &MI) {
+    return MI.getOpcode() == AArch64::INLINEASM_BR;
+  };
+  if (llvm::any_of(MBB, isAsmGoto) || MBB.isInlineAsmBrIndirectTarget())
+    return false;
+
+  // Because jump tables are label-relative instead of table-relative, they all
+  // must be in the same section or relocation fixup handling will fail.
+
+  // Check if MBB is a jump table target
+  const MachineJumpTableInfo *MJTI = MBB.getParent()->getJumpTableInfo();
+  auto containsMBB = [&MBB](const MachineJumpTableEntry &JTE) {
+    return llvm::is_contained(JTE.MBBs, &MBB);
+  };
+  if (MJTI != nullptr && llvm::any_of(MJTI->getJumpTables(), containsMBB))
+    return false;
+
+  // Check if MBB contains a jump table lookup
+  for (const MachineInstr &MI : MBB) {
+    switch (MI.getOpcode()) {
+    case TargetOpcode::G_BRJT:
+    case AArch64::JumpTableDest32:
+    case AArch64::JumpTableDest16:
+    case AArch64::JumpTableDest8:
+      return false;
+    default:
+      continue;
+    }
+  }
+
+  // MBB isn't a special case, so it's safe to be split to the cold section.
+  return true;
+}
+
 std::optional<ParamLoadedValue>
 AArch64InstrInfo::describeLoadedValue(const MachineInstr &MI,
                                       Register Reg) const {
@@ -8385,8 +8533,8 @@ bool AArch64InstrInfo::isWhileOpcode(unsigned Opc) const {
 }
 
 unsigned int
-AArch64InstrInfo::getTailDuplicateSize(CodeGenOpt::Level OptLevel) const {
-  return OptLevel >= CodeGenOpt::Aggressive ? 6 : 2;
+AArch64InstrInfo::getTailDuplicateSize(CodeGenOptLevel OptLevel) const {
+  return OptLevel >= CodeGenOptLevel::Aggressive ? 6 : 2;
 }
 
 unsigned llvm::getBLRCallOpcode(const MachineFunction &MF) {
@@ -8394,6 +8542,58 @@ unsigned llvm::getBLRCallOpcode(const MachineFunction &MF) {
     return AArch64::BLRNoIP;
   else
     return AArch64::BLR;
+}
+
+bool AArch64InstrInfo::isReallyTriviallyReMaterializable(
+    const MachineInstr &MI) const {
+  const MachineFunction &MF = *MI.getMF();
+  const AArch64FunctionInfo &AFI = *MF.getInfo<AArch64FunctionInfo>();
+
+  // If the function contains changes to streaming mode, then there
+  // is a danger that rematerialised instructions end up between
+  // instruction sequences (e.g. call sequences, or prolog/epilogue)
+  // where the streaming-SVE mode is temporarily changed.
+  if (AFI.hasStreamingModeChanges()) {
+    // Avoid rematerializing rematerializable instructions that use/define
+    // scalable values, such as 'pfalse' or 'ptrue', which result in different
+    // results when the runtime vector length is different.
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    const MachineFrameInfo &MFI = MF.getFrameInfo();
+    if (any_of(MI.operands(), [&MRI, &MFI](const MachineOperand &MO) {
+          if (MO.isFI() &&
+              MFI.getStackID(MO.getIndex()) == TargetStackID::ScalableVector)
+            return true;
+          if (!MO.isReg())
+            return false;
+
+          if (MO.getReg().isVirtual()) {
+            const TargetRegisterClass *RC = MRI.getRegClass(MO.getReg());
+            return AArch64::ZPRRegClass.hasSubClassEq(RC) ||
+                   AArch64::PPRRegClass.hasSubClassEq(RC);
+          }
+          return AArch64::ZPRRegClass.contains(MO.getReg()) ||
+                 AArch64::PPRRegClass.contains(MO.getReg());
+        }))
+      return false;
+
+    // Avoid rematerializing instructions that return a value that is
+    // different depending on vector length, even when it is not returned
+    // in a scalable vector/predicate register.
+    switch (MI.getOpcode()) {
+    default:
+      break;
+    case AArch64::RDVLI_XI:
+    case AArch64::ADDVL_XXI:
+    case AArch64::ADDPL_XXI:
+    case AArch64::CNTB_XPiI:
+    case AArch64::CNTH_XPiI:
+    case AArch64::CNTW_XPiI:
+    case AArch64::CNTD_XPiI:
+      return false;
+    }
+  }
+
+  return TargetInstrInfo::isReallyTriviallyReMaterializable(MI);
 }
 
 #define GET_INSTRINFO_HELPERS

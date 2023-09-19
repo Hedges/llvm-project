@@ -15,6 +15,10 @@
 using namespace llvm;
 using namespace llvm::opt;
 
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 enum ID {
   OPT_INVALID = 0, // This is not an option ID.
 #define OPTION(...) LLVM_MAKE_OPT_ID(__VA_ARGS__),
@@ -233,6 +237,33 @@ TYPED_TEST(OptTableTest, IgnoreCase) {
   EXPECT_TRUE(AL.hasArg(OPT_A));
   EXPECT_TRUE(AL.hasArg(OPT_B));
 }
+
+#if defined(__clang__)
+// Disable the warning that triggers on exactly what is being tested.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wself-move"
+#endif
+
+TYPED_TEST(OptTableTest, InputArgListSelfAssign) {
+  TypeParam T;
+  unsigned MAI, MAC;
+  InputArgList AL = T.ParseArgs(Args, MAI, MAC,
+                                /*FlagsToInclude=*/0,
+                                /*FlagsToExclude=*/OptFlag3);
+  EXPECT_TRUE(AL.hasArg(OPT_A));
+  EXPECT_TRUE(AL.hasArg(OPT_C));
+  EXPECT_FALSE(AL.hasArg(OPT_SLASH_C));
+
+  AL = std::move(AL);
+
+  EXPECT_TRUE(AL.hasArg(OPT_A));
+  EXPECT_TRUE(AL.hasArg(OPT_C));
+  EXPECT_FALSE(AL.hasArg(OPT_SLASH_C));
+}
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 TYPED_TEST(OptTableTest, DoNotIgnoreCase) {
   TypeParam T;

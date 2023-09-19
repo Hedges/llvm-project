@@ -554,6 +554,15 @@ void JSONNodeDumper::VisitSectionAttr(const SectionAttr *SA) {
   JOS.attribute("section_name", SA->getName());
 }
 
+void JSONNodeDumper::VisitVisibilityAttr(const VisibilityAttr *VA) {
+  JOS.attribute("visibility", VisibilityAttr::ConvertVisibilityTypeToStr(
+                                  VA->getVisibility()));
+}
+
+void JSONNodeDumper::VisitTLSModelAttr(const TLSModelAttr *TA) {
+  JOS.attribute("tls_model", TA->getModel());
+}
+
 void JSONNodeDumper::VisitTypedefType(const TypedefType *TT) {
   JOS.attribute("decl", createBareDeclRef(TT->getDecl()));
   if (!TT->typeMatchesDecl())
@@ -1168,6 +1177,10 @@ void JSONNodeDumper::VisitObjCPropertyImplDecl(const ObjCPropertyImplDecl *D) {
 void JSONNodeDumper::VisitBlockDecl(const BlockDecl *D) {
   attributeOnlyIfTrue("variadic", D->isVariadic());
   attributeOnlyIfTrue("capturesThis", D->capturesCXXThis());
+}
+
+void JSONNodeDumper::VisitAtomicExpr(const AtomicExpr *AE) {
+  JOS.attribute("name", AE->getOpAsString());
 }
 
 void JSONNodeDumper::VisitObjCEncodeExpr(const ObjCEncodeExpr *OEE) {
