@@ -14,6 +14,7 @@
 
 #include "SPIRVParsingUtils.h"
 
+#include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
@@ -100,8 +101,7 @@ struct SPIRVInlinerInterface : public DialectInlinerInterface {
 
   /// Handle the given inlined terminator by replacing it with a new operation
   /// as necessary.
-  void handleTerminator(Operation *op,
-                        ArrayRef<Value> valuesToRepl) const final {
+  void handleTerminator(Operation *op, ValueRange valuesToRepl) const final {
     // Only spirv.ReturnValue needs to be handled here.
     auto retValOp = dyn_cast<spirv::ReturnValueOp>(op);
     if (!retValOp)
@@ -133,6 +133,7 @@ void SPIRVDialect::initialize() {
 
   // Allow unknown operations because SPIR-V is extensible.
   allowUnknownOperations();
+  declarePromisedInterface<TargetEnvAttr, gpu::TargetAttrInterface>();
 }
 
 std::string SPIRVDialect::getAttributeName(Decoration decoration) {
@@ -991,30 +992,39 @@ static LogicalResult verifyRegionAttribute(Location loc, Type valueType,
   StringRef symbol = attribute.getName().strref();
   Attribute attr = attribute.getValue();
 
-  if (symbol != spirv::getInterfaceVarABIAttrName())
-    return emitError(loc, "found unsupported '")
-           << symbol << "' attribute on region argument";
+  if (symbol == spirv::getInterfaceVarABIAttrName()) {
+    auto varABIAttr = llvm::dyn_cast<spirv::InterfaceVarABIAttr>(attr);
+    if (!varABIAttr)
+      return emitError(loc, "'")
+             << symbol << "' must be a spirv::InterfaceVarABIAttr";
 
-  auto varABIAttr = llvm::dyn_cast<spirv::InterfaceVarABIAttr>(attr);
-  if (!varABIAttr)
-    return emitError(loc, "'")
-           << symbol << "' must be a spirv::InterfaceVarABIAttr";
+    if (varABIAttr.getStorageClass() && !valueType.isIntOrIndexOrFloat())
+      return emitError(loc, "'") << symbol
+                                 << "' attribute cannot specify storage class "
+                                    "when attaching to a non-scalar value";
+    return success();
+  }
+  if (symbol == spirv::DecorationAttr::name) {
+    if (!isa<spirv::DecorationAttr>(attr))
+      return emitError(loc, "'")
+             << symbol << "' must be a spirv::DecorationAttr";
+    return success();
+  }
 
-  if (varABIAttr.getStorageClass() && !valueType.isIntOrIndexOrFloat())
-    return emitError(loc, "'") << symbol
-                               << "' attribute cannot specify storage class "
-                                  "when attaching to a non-scalar value";
-
-  return success();
+  return emitError(loc, "found unsupported '")
+         << symbol << "' attribute on region argument";
 }
 
 LogicalResult SPIRVDialect::verifyRegionArgAttribute(Operation *op,
                                                      unsigned regionIndex,
                                                      unsigned argIndex,
                                                      NamedAttribute attribute) {
-  return verifyRegionAttribute(
-      op->getLoc(), op->getRegion(regionIndex).getArgument(argIndex).getType(),
-      attribute);
+  auto funcOp = dyn_cast<FunctionOpInterface>(op);
+  if (!funcOp)
+    return success();
+  Type argType = funcOp.getArgumentTypes()[argIndex];
+
+  return verifyRegionAttribute(op->getLoc(), argType, attribute);
 }
 
 LogicalResult SPIRVDialect::verifyRegionResultAttribute(

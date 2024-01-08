@@ -298,8 +298,7 @@ SDValue AVRTargetLowering::LowerShifts(SDValue Op, SelectionDAG &DAG) const {
     SDValue SrcHi =
         DAG.getNode(ISD::EXTRACT_ELEMENT, dl, MVT::i16, Op.getOperand(0),
                     DAG.getConstant(1, dl, MVT::i16));
-    uint64_t ShiftAmount =
-        cast<ConstantSDNode>(N->getOperand(1))->getZExtValue();
+    uint64_t ShiftAmount = N->getConstantOperandVal(1);
     if (ShiftAmount == 16) {
       // Special case these two operations because they appear to be used by the
       // generic codegen parts to lower 32-bit numbers.
@@ -367,7 +366,7 @@ SDValue AVRTargetLowering::LowerShifts(SDValue Op, SelectionDAG &DAG) const {
     }
   }
 
-  uint64_t ShiftAmount = cast<ConstantSDNode>(N->getOperand(1))->getZExtValue();
+  uint64_t ShiftAmount = N->getConstantOperandVal(1);
   SDValue Victim = N->getOperand(0);
 
   switch (Op.getOpcode()) {
@@ -2722,7 +2721,7 @@ AVRTargetLowering::getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
 }
 
 void AVRTargetLowering::LowerAsmOperandForConstraint(SDValue Op,
-                                                     std::string &Constraint,
+                                                     StringRef Constraint,
                                                      std::vector<SDValue> &Ops,
                                                      SelectionDAG &DAG) const {
   SDValue Result;
@@ -2730,7 +2729,7 @@ void AVRTargetLowering::LowerAsmOperandForConstraint(SDValue Op,
   EVT Ty = Op.getValueType();
 
   // Currently only support length 1 constraints.
-  if (Constraint.length() != 1) {
+  if (Constraint.size() != 1) {
     return;
   }
 

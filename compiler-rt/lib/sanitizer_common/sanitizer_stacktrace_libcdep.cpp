@@ -29,34 +29,35 @@ class StackTraceTextPrinter {
         frame_delimiter_(frame_delimiter),
         output_(output),
         dedup_token_(dedup_token),
-        symbolize_(RenderNeedsSymbolization(stack_trace_fmt)) {}
+        symbolize_(StackTracePrinter::GetOrInit()->RenderNeedsSymbolization(
+            stack_trace_fmt)) {}
 
   bool ProcessAddressFrames(uptr pc) {
-    SymbolizedStack *frames = symbolize_
-                                  ? Symbolizer::GetOrInit()->SymbolizePC(pc)
-                                  : SymbolizedStack::New(pc);
+    SymbolizedStackHolder symbolized_stack(
+        symbolize_ ? Symbolizer::GetOrInit()->SymbolizePC(pc)
+                   : SymbolizedStack::New(pc));
+    const SymbolizedStack *frames = symbolized_stack.get();
     if (!frames)
       return false;
 
-    for (SymbolizedStack *cur = frames; cur; cur = cur->next) {
+    for (const SymbolizedStack *cur = frames; cur; cur = cur->next) {
       uptr prev_len = output_->length();
-      RenderFrame(output_, stack_trace_fmt_, frame_num_++, cur->info.address,
-                  symbolize_ ? &cur->info : nullptr,
-                  common_flags()->symbolize_vs_style,
-                  common_flags()->strip_path_prefix);
+      StackTracePrinter::GetOrInit()->RenderFrame(
+          output_, stack_trace_fmt_, frame_num_++, cur->info.address,
+          symbolize_ ? &cur->info : nullptr, common_flags()->symbolize_vs_style,
+          common_flags()->strip_path_prefix);
 
       if (prev_len != output_->length())
         output_->AppendF("%c", frame_delimiter_);
 
       ExtendDedupToken(cur);
     }
-    frames->ClearAll();
     return true;
   }
 
  private:
   // Extend the dedup token by appending a new frame.
-  void ExtendDedupToken(SymbolizedStack *stack) {
+  void ExtendDedupToken(const SymbolizedStack *stack) {
     if (!dedup_token_)
       return;
 
@@ -210,7 +211,8 @@ void __sanitizer_symbolize_global(uptr data_addr, const char *fmt,
   DataInfo DI;
   if (!Symbolizer::GetOrInit()->SymbolizeData(data_addr, &DI)) return;
   InternalScopedString data_desc;
-  RenderData(&data_desc, fmt, &DI, common_flags()->strip_path_prefix);
+  StackTracePrinter::GetOrInit()->RenderData(&data_desc, fmt, &DI,
+                                             common_flags()->strip_path_prefix);
   internal_strncpy(out_buf, data_desc.data(), out_buf_size);
   out_buf[out_buf_size - 1] = 0;
 }

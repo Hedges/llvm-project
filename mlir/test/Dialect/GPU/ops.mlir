@@ -84,6 +84,8 @@ module attributes {gpu.container_module} {
 
       %one = arith.constant 1.0 : f32
 
+      %vec = vector.broadcast %arg0 : f32 to vector<4xf32>
+
       // CHECK: %{{.*}} = gpu.all_reduce add %{{.*}} {
       // CHECK-NEXT: } : (f32) -> f32
       %sum = gpu.all_reduce add %one {} : (f32) -> (f32)
@@ -97,6 +99,9 @@ module attributes {gpu.container_module} {
 
       // CHECK: %{{.*}} = gpu.subgroup_reduce add %{{.*}} uniform : (f32) -> f32
       %sum_subgroup1 = gpu.subgroup_reduce add %one uniform : (f32) -> f32
+
+      // CHECK: %{{.*}} = gpu.subgroup_reduce add %{{.*}} : (vector<4xf32>) -> vector<4xf32>
+      %sum_subgroup2 = gpu.subgroup_reduce add %vec : (vector<4xf32>) -> vector<4xf32>
 
       %width = arith.constant 7 : i32
       %offset = arith.constant 3 : i32
@@ -147,10 +152,13 @@ module attributes {gpu.container_module} {
     %cstI64 = arith.constant 8 : i64
     %c0 = arith.constant 0 : i32
     %t0 = gpu.wait async
-    %lowStream = llvm.mlir.null : !llvm.ptr
+    %lowStream = llvm.mlir.zero : !llvm.ptr
 
     // CHECK: gpu.launch_func @kernels::@kernel_1 blocks in (%{{.*}}, %{{.*}}, %{{.*}}) threads in (%{{.*}}, %{{.*}}, %{{.*}}) args(%{{.*}} : f32, %{{.*}} : memref<?xf32, 1>)
     gpu.launch_func @kernels::@kernel_1 blocks in (%cst, %cst, %cst) threads in (%cst, %cst, %cst) args(%0 : f32, %1 : memref<?xf32, 1>)
+
+    // CHECK: gpu.launch_func @kernels::@kernel_1 clusters in (%{{.*}}, %{{.*}}, %{{.*}}) blocks in (%{{.*}}, %{{.*}}, %{{.*}}) threads in (%{{.*}}, %{{.*}}, %{{.*}}) args(%{{.*}} : f32, %{{.*}} : memref<?xf32, 1>)
+    gpu.launch_func @kernels::@kernel_1 clusters in (%cst, %cst, %cst) blocks in (%cst, %cst, %cst) threads in (%cst, %cst, %cst) args(%0 : f32, %1 : memref<?xf32, 1>)
 
     gpu.launch_func @kernels::@kernel_1 blocks in (%cst, %cst, %cst) threads in (%cst, %cst, %cst) dynamic_shared_memory_size %c0 args(%0 : f32, %1 : memref<?xf32, 1>)
 

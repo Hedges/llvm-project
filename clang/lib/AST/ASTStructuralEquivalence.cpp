@@ -214,6 +214,15 @@ class StmtComparer {
     return E1->size() == E2->size();
   }
 
+  bool IsStmtEquivalent(const DeclRefExpr *DRE1, const DeclRefExpr *DRE2) {
+    const ValueDecl *Decl1 = DRE1->getDecl();
+    const ValueDecl *Decl2 = DRE2->getDecl();
+    if (!Decl1 || !Decl2)
+      return false;
+    return IsStructurallyEquivalent(Context, const_cast<ValueDecl *>(Decl1),
+                                    const_cast<ValueDecl *>(Decl2));
+  }
+
   bool IsStmtEquivalent(const DependentScopeDeclRefExpr *DE1,
                         const DependentScopeDeclRefExpr *DE2) {
     if (!IsStructurallyEquivalent(Context, DE1->getDeclName(),
@@ -276,6 +285,17 @@ class StmtComparer {
   }
 
   bool IsStmtEquivalent(const Stmt *S1, const Stmt *S2) { return true; }
+
+  bool IsStmtEquivalent(const GotoStmt *S1, const GotoStmt *S2) {
+    LabelDecl *L1 = S1->getLabel();
+    LabelDecl *L2 = S2->getLabel();
+    if (!L1 || !L2)
+      return L1 == L2;
+
+    IdentifierInfo *Name1 = L1->getIdentifier();
+    IdentifierInfo *Name2 = L2->getIdentifier();
+    return ::IsStructurallyEquivalent(Name1, Name2);
+  }
 
   bool IsStmtEquivalent(const SourceLocExpr *E1, const SourceLocExpr *E2) {
     return E1->getIdentKind() == E2->getIdentKind();
@@ -1153,7 +1173,9 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   case Type::Elaborated: {
     const auto *Elab1 = cast<ElaboratedType>(T1);
     const auto *Elab2 = cast<ElaboratedType>(T2);
-    // CHECKME: what if a keyword is ETK_None or ETK_typename ?
+    // CHECKME: what if a keyword is ElaboratedTypeKeyword::None or
+    // ElaboratedTypeKeyword::Typename
+    // ?
     if (Elab1->getKeyword() != Elab2->getKeyword())
       return false;
     if (!IsStructurallyEquivalent(Context, Elab1->getQualifier(),
@@ -1296,6 +1318,22 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
 }
 
 static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
+                                     VarDecl *D1, VarDecl *D2) {
+  if (D1->getStorageClass() != D2->getStorageClass())
+    return false;
+
+  IdentifierInfo *Name1 = D1->getIdentifier();
+  IdentifierInfo *Name2 = D2->getIdentifier();
+  if (!::IsStructurallyEquivalent(Name1, Name2))
+    return false;
+
+  if (!IsStructurallyEquivalent(Context, D1->getType(), D2->getType()))
+    return false;
+
+  return IsStructurallyEquivalent(Context, D1->getInit(), D2->getInit());
+}
+
+static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
                                      FieldDecl *Field1, FieldDecl *Field2,
                                      QualType Owner2Type) {
   const auto *Owner2 = cast<Decl>(Field2->getDeclContext());
@@ -1367,6 +1405,8 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
       Method1->getAccess() == Method2->getAccess() &&
       Method1->getOverloadedOperator() == Method2->getOverloadedOperator() &&
       Method1->isStatic() == Method2->isStatic() &&
+      Method1->isImplicitObjectMemberFunction() ==
+          Method2->isImplicitObjectMemberFunction() &&
       Method1->isConst() == Method2->isConst() &&
       Method1->isVolatile() == Method2->isVolatile() &&
       Method1->isVirtual() == Method2->isVirtual() &&
@@ -1423,8 +1463,9 @@ IsStructurallyEquivalentLambdas(StructuralEquivalenceContext &Context,
 }
 
 /// Determine if context of a class is equivalent.
-static bool IsRecordContextStructurallyEquivalent(RecordDecl *D1,
-                                                  RecordDecl *D2) {
+static bool
+IsRecordContextStructurallyEquivalent(StructuralEquivalenceContext &Context,
+                                      RecordDecl *D1, RecordDecl *D2) {
   // The context should be completely equal, including anonymous and inline
   // namespaces.
   // We compare objects as part of full translation units, not subtrees of
@@ -1448,6 +1489,12 @@ static bool IsRecordContextStructurallyEquivalent(RecordDecl *D1,
       const auto *ND2 = cast<NamedDecl>(DC2);
       if (!DC1->isInlineNamespace() &&
           !IsStructurallyEquivalent(ND1->getIdentifier(), ND2->getIdentifier()))
+        return false;
+    }
+
+    if (auto *D1Spec = dyn_cast<ClassTemplateSpecializationDecl>(DC1)) {
+      auto *D2Spec = dyn_cast<ClassTemplateSpecializationDecl>(DC2);
+      if (!IsStructurallyEquivalent(Context, D1Spec, D2Spec))
         return false;
     }
 
@@ -1504,7 +1551,7 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   // If the records occur in different context (namespace), these should be
   // different. This is specially important if the definition of one or both
   // records is missing.
-  if (!IsRecordContextStructurallyEquivalent(D1, D2))
+  if (!IsRecordContextStructurallyEquivalent(Context, D1, D2))
     return false;
 
   // If both declarations are class template specializations, we know
@@ -1935,6 +1982,18 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
   // Check the templated declaration.
   return IsStructurallyEquivalent(Context, D1->getTemplatedDecl()->getType(),
                                   D2->getTemplatedDecl()->getType());
+}
+
+static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
+                                     TypeAliasTemplateDecl *D1,
+                                     TypeAliasTemplateDecl *D2) {
+  // Check template parameters.
+  if (!IsTemplateDeclCommonStructurallyEquivalent(Context, D1, D2))
+    return false;
+
+  // Check the templated declaration.
+  return IsStructurallyEquivalent(Context, D1->getTemplatedDecl(),
+                                  D2->getTemplatedDecl());
 }
 
 static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,

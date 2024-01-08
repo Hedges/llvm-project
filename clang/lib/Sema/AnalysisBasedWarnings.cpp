@@ -1983,6 +1983,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         case POK_PtPassByRef:
           DiagID = diag::warn_pt_guarded_pass_by_reference;
           break;
+        case POK_ReturnByRef:
+          DiagID = diag::warn_guarded_return_by_reference;
+          break;
+        case POK_PtReturnByRef:
+          DiagID = diag::warn_pt_guarded_return_by_reference;
+          break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
                                                        << D
@@ -2012,6 +2018,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
           break;
         case POK_PtPassByRef:
           DiagID = diag::warn_pt_guarded_pass_by_reference;
+          break;
+        case POK_ReturnByRef:
+          DiagID = diag::warn_guarded_return_by_reference;
+          break;
+        case POK_PtReturnByRef:
+          DiagID = diag::warn_pt_guarded_return_by_reference;
           break;
       }
       PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
@@ -2214,8 +2226,8 @@ public:
   UnsafeBufferUsageReporter(Sema &S, bool SuggestSuggestions)
     : S(S), SuggestSuggestions(SuggestSuggestions) {}
 
-  void handleUnsafeOperation(const Stmt *Operation,
-                             bool IsRelatedToDecl) override {
+  void handleUnsafeOperation(const Stmt *Operation, bool IsRelatedToDecl,
+                             ASTContext &Ctx) override {
     SourceLocation Loc;
     SourceRange Range;
     unsigned MsgParam = 0;
@@ -2249,6 +2261,18 @@ public:
         // note_unsafe_buffer_operation doesn't have this mode yet.
         assert(!IsRelatedToDecl && "Not implemented yet!");
         MsgParam = 3;
+      } else if (const auto *ECE = dyn_cast<ExplicitCastExpr>(Operation)) {
+        QualType destType = ECE->getType();
+        const uint64_t dSize =
+            Ctx.getTypeSize(destType.getTypePtr()->getPointeeType());
+        if (const auto *CE = dyn_cast<CXXMemberCallExpr>(ECE->getSubExpr())) {
+          QualType srcType = CE->getType();
+          const uint64_t sSize =
+              Ctx.getTypeSize(srcType.getTypePtr()->getPointeeType());
+          if (sSize >= dSize)
+            return;
+        }
+        MsgParam = 4;
       }
       Loc = Operation->getBeginLoc();
       Range = Operation->getSourceRange();
@@ -2267,21 +2291,30 @@ public:
 
   void handleUnsafeVariableGroup(const VarDecl *Variable,
                                  const VariableGroupsManager &VarGrpMgr,
-                                 FixItList &&Fixes) override {
+                                 FixItList &&Fixes, const Decl *D) override {
     assert(!SuggestSuggestions &&
            "Unsafe buffer usage fixits displayed without suggestions!");
     S.Diag(Variable->getLocation(), diag::warn_unsafe_buffer_variable)
         << Variable << (Variable->getType()->isPointerType() ? 0 : 1)
         << Variable->getSourceRange();
     if (!Fixes.empty()) {
-      const auto VarGroupForVD = VarGrpMgr.getGroupOfVar(Variable);
+      assert(isa<NamedDecl>(D) &&
+             "Fix-its are generated only for `NamedDecl`s");
+      const NamedDecl *ND = cast<NamedDecl>(D);
+      bool BriefMsg = false;
+      // If the variable group involves parameters, the diagnostic message will
+      // NOT explain how the variables are grouped as the reason is non-trivial
+      // and irrelavant to users' experience:
+      const auto VarGroupForVD = VarGrpMgr.getGroupOfVar(Variable, &BriefMsg);
       unsigned FixItStrategy = 0; // For now we only have 'std::span' strategy
-      const auto &FD = S.Diag(Variable->getLocation(),
-                              diag::note_unsafe_buffer_variable_fixit_group);
+      const auto &FD =
+          S.Diag(Variable->getLocation(),
+                 BriefMsg ? diag::note_unsafe_buffer_variable_fixit_together
+                          : diag::note_unsafe_buffer_variable_fixit_group);
 
       FD << Variable << FixItStrategy;
       FD << listVariableGroupAsString(Variable, VarGroupForVD)
-         << (VarGroupForVD.size() > 1);
+         << (VarGroupForVD.size() > 1) << ND;
       for (const auto &F : Fixes) {
         FD << F;
       }

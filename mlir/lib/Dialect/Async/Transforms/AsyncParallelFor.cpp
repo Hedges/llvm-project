@@ -429,8 +429,9 @@ static ParallelComputeFunction createParallelComputeFunction(
       mapping.map(op.getInductionVars(), computeBlockInductionVars);
       mapping.map(computeFuncType.captures, captures);
 
-      for (auto &bodyOp : op.getLoopBody().getOps())
+      for (auto &bodyOp : op.getRegion().front().without_terminator())
         b.clone(bodyOp, mapping);
+      b.create<scf::YieldOp>(loc);
     };
   };
 
@@ -732,7 +733,7 @@ AsyncParallelForRewrite::matchAndRewrite(scf::ParallelOp op,
 
   // Make sure that all constants will be inside the parallel operation body to
   // reduce the number of parallel compute function arguments.
-  cloneConstantsIntoTheRegion(op.getLoopBody(), rewriter);
+  cloneConstantsIntoTheRegion(op.getRegion(), rewriter);
 
   // Compute trip count for each loop induction variable:
   //   tripCount = ceil_div(upperBound - lowerBound, step);
