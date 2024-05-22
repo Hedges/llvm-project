@@ -16,6 +16,7 @@
 #define BOLT_CORE_DIE_BUILDER_H
 
 #include "bolt/Core/BinaryContext.h"
+#include "bolt/Core/DebugNames.h"
 #include "llvm/CodeGen/DIE.h"
 #include "llvm/DebugInfo/DWARF/DWARFAbbreviationDeclaration.h"
 #include "llvm/DebugInfo/DWARF/DWARFDie.h"
@@ -127,6 +128,10 @@ private:
   DWARFUnit *SkeletonCU{nullptr};
   uint64_t UnitSize{0};
   llvm::DenseSet<uint64_t> AllProcessed;
+  DWARF5AcceleratorTable &DebugNamesTable;
+  // Unordered map to handle name collision if output DWO directory is
+  // specified.
+  std::unordered_map<std::string, uint32_t> NameToIndexMap;
 
   /// Returns current state of the DIEBuilder
   State &getState() { return *BuilderState.get(); }
@@ -206,8 +211,14 @@ private:
   /// Update references once the layout is finalized.
   void updateReferences();
 
-  /// Update the Offset and Size of DIE.
-  uint32_t computeDIEOffset(const DWARFUnit &CU, DIE &Die, uint32_t &CurOffset);
+  /// Update the Offset and Size of DIE, populate DebugNames table.
+  /// Along with current CU, and DIE being processed and the new DIE offset to
+  /// be updated, it takes in Parents vector that can be empty if this DIE has
+  /// no parents.
+  uint32_t
+  finalizeDIEs(DWARFUnit &CU, DIE &Die,
+               std::vector<std::optional<BOLTDWARF5AccelTableData *>> &Parents,
+               uint32_t &CurOffset);
 
   void registerUnit(DWARFUnit &DU, bool NeedSort);
 
@@ -269,6 +280,7 @@ private:
 
 public:
   DIEBuilder(BinaryContext &BC, DWARFContext *DwarfContext,
+             DWARF5AcceleratorTable &DebugNamesTable,
              DWARFUnit *SkeletonCU = nullptr);
 
   /// Returns enum to what we are currently processing.
@@ -375,6 +387,17 @@ public:
   bool deleteValue(DIEValueList *Die, dwarf::Attribute Attribute) {
     return Die->deleteValue(Attribute);
   }
+  /// Updates DWO Name and Compilation directory for Skeleton CU \p Unit.
+  std::string updateDWONameCompDir(DebugStrOffsetsWriter &StrOffstsWriter,
+                                   DebugStrWriter &StrWriter,
+                                   DWARFUnit &SkeletonCU,
+                                   std::optional<StringRef> DwarfOutputPath,
+                                   std::optional<StringRef> DWONameToUse);
+  /// Updates DWO Name and Compilation directory for Type Units.
+  void updateDWONameCompDirForTypes(DebugStrOffsetsWriter &StrOffstsWriter,
+                                    DebugStrWriter &StrWriter, DWARFUnit &Unit,
+                                    std::optional<StringRef> DwarfOutputPath,
+                                    const StringRef DWOName);
 };
 } // namespace bolt
 } // namespace llvm

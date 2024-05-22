@@ -1,4 +1,8 @@
-! RUN: %python %S/../test_errors.py %s %flang_fc1 -fopenmp
+! UNSUPPORTED: system-windows
+! Marking as unsupported due to suspected long runtime on Windows
+! REQUIRES: openmp_runtime
+
+! RUN: %python %S/../test_errors.py %s %flang_fc1 %openmp_flags
 ! OpenMP Version 5.1
 ! Check OpenMP construct validity for the following directives:
 ! 2.21.2 Threadprivate Directive

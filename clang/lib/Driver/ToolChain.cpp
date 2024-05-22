@@ -453,12 +453,6 @@ ToolChain::getDefaultUnwindTableLevel(const ArgList &Args) const {
   return UnwindTableLevel::None;
 }
 
-unsigned ToolChain::GetDefaultDwarfVersion() const {
-  // TODO: Remove the RISC-V special case when R_RISCV_SET_ULEB128 linker
-  // support becomes more widely available.
-  return getTriple().isRISCV() ? 4 : 5;
-}
-
 Tool *ToolChain::getClang() const {
   if (!Clang)
     Clang.reset(new tools::Clang(*this, useIntegratedBackend()));
@@ -681,19 +675,29 @@ std::string ToolChain::getCompilerRT(const ArgList &Args, StringRef Component,
   // Check for runtime files in the new layout without the architecture first.
   std::string CRTBasename =
       buildCompilerRTBasename(Args, Component, Type, /*AddArch=*/false);
+  SmallString<128> Path;
   for (const auto &LibPath : getLibraryPaths()) {
     SmallString<128> P(LibPath);
     llvm::sys::path::append(P, CRTBasename);
     if (getVFS().exists(P))
       return std::string(P);
+    if (Path.empty())
+      Path = P;
   }
+  if (getTriple().isOSAIX())
+    Path.clear();
 
-  // Fall back to the old expected compiler-rt name if the new one does not
-  // exist.
+  // Check the filename for the old layout if the new one does not exist.
   CRTBasename =
       buildCompilerRTBasename(Args, Component, Type, /*AddArch=*/true);
-  SmallString<128> Path(getCompilerRTPath());
-  llvm::sys::path::append(Path, CRTBasename);
+  SmallString<128> OldPath(getCompilerRTPath());
+  llvm::sys::path::append(OldPath, CRTBasename);
+  if (Path.empty() || getVFS().exists(OldPath))
+    return std::string(OldPath);
+
+  // If none is found, use a file name from the new layout, which may get
+  // printed in an error message, aiding users in knowing what Clang is
+  // looking for.
   return std::string(Path);
 }
 
@@ -792,7 +796,13 @@ ToolChain::getTargetSubDirPath(StringRef BaseDir) const {
 std::optional<std::string> ToolChain::getRuntimePath() const {
   SmallString<128> P(D.ResourceDir);
   llvm::sys::path::append(P, "lib");
-  return getTargetSubDirPath(P);
+  if (auto Ret = getTargetSubDirPath(P))
+    return Ret;
+  // Darwin does not use per-target runtime directory.
+  if (Triple.isOSDarwin())
+    return {};
+  llvm::sys::path::append(P, Triple.str());
+  return std::string(P);
 }
 
 std::optional<std::string> ToolChain::getStdlibPath() const {
@@ -1297,19 +1307,35 @@ void ToolChain::AddCCKextLibArgs(const ArgList &Args,
 
 bool ToolChain::isFastMathRuntimeAvailable(const ArgList &Args,
                                            std::string &Path) const {
+  // Don't implicitly link in mode-changing libraries in a shared library, since
+  // this can have very deleterious effects. See the various links from
+  // https://github.com/llvm/llvm-project/issues/57589 for more information.
+  bool Default = !Args.hasArgNoClaim(options::OPT_shared);
+
   // Do not check for -fno-fast-math or -fno-unsafe-math when -Ofast passed
   // (to keep the linker options consistent with gcc and clang itself).
-  if (!isOptimizationLevelFast(Args)) {
+  if (Default && !isOptimizationLevelFast(Args)) {
     // Check if -ffast-math or -funsafe-math.
-    Arg *A =
-      Args.getLastArg(options::OPT_ffast_math, options::OPT_fno_fast_math,
-                      options::OPT_funsafe_math_optimizations,
-                      options::OPT_fno_unsafe_math_optimizations);
+    Arg *A = Args.getLastArg(
+        options::OPT_ffast_math, options::OPT_fno_fast_math,
+        options::OPT_funsafe_math_optimizations,
+        options::OPT_fno_unsafe_math_optimizations, options::OPT_ffp_model_EQ);
 
     if (!A || A->getOption().getID() == options::OPT_fno_fast_math ||
         A->getOption().getID() == options::OPT_fno_unsafe_math_optimizations)
-      return false;
+      Default = false;
+    if (A && A->getOption().getID() == options::OPT_ffp_model_EQ) {
+      StringRef Model = A->getValue();
+      if (Model != "fast")
+        Default = false;
+    }
   }
+
+  // Whatever decision came as a result of the above implicit settings, either
+  // -mdaz-ftz or -mno-daz-ftz is capable of overriding it.
+  if (!Args.hasFlag(options::OPT_mdaz_ftz, options::OPT_mno_daz_ftz, Default))
+    return false;
+
   // If crtfastmath.o exists add it to the arguments.
   Path = GetFilePath("crtfastmath.o");
   return (Path != "crtfastmath.o"); // Not found.

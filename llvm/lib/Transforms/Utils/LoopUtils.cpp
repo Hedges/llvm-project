@@ -31,6 +31,7 @@
 #include "llvm/Analysis/ScalarEvolutionAliasAnalysis.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -222,7 +223,7 @@ void llvm::addStringMetadataToLoop(Loop *TheLoop, const char *StringMD,
       // If it is of form key = value, try to parse it.
       if (Node->getNumOperands() == 2) {
         MDString *S = dyn_cast<MDString>(Node->getOperand(0));
-        if (S && S->getString().equals(StringMD)) {
+        if (S && S->getString() == StringMD) {
           ConstantInt *IntMD =
               mdconst::extract_or_null<ConstantInt>(Node->getOperand(1));
           if (IntMD && IntMD->getSExtValue() == V)
@@ -468,6 +469,7 @@ llvm::collectChildrenInLoop(DomTreeNode *N, const Loop *CurLoop) {
 
 bool llvm::isAlmostDeadIV(PHINode *PN, BasicBlock *LatchBlock, Value *Cond) {
   int LatchIdx = PN->getBasicBlockIndex(LatchBlock);
+  assert(LatchIdx != -1 && "LatchBlock is not a case in this PHINode");
   Value *IncV = PN->getIncomingValue(LatchIdx);
 
   for (User *U : PN->users())
@@ -604,9 +606,20 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
   // Use a map to unique and a vector to guarantee deterministic ordering.
   llvm::SmallDenseSet<DebugVariable, 4> DeadDebugSet;
   llvm::SmallVector<DbgVariableIntrinsic *, 4> DeadDebugInst;
-  llvm::SmallVector<DPValue *, 4> DeadDPValues;
+  llvm::SmallVector<DbgVariableRecord *, 4> DeadDbgVariableRecords;
 
   if (ExitBlock) {
+    if (ExitBlock->phis().empty()) {
+      // As the loop is deleted, replace the debug users with the preserved
+      // induction variable final value recorded by the 'indvar' pass.
+      Value *FinalValue = L->getDebugInductionVariableFinalValue();
+      SmallVector<WeakVH> &DbgUsers = L->getDebugInductionVariableDebugUsers();
+      for (WeakVH &DebugUser : DbgUsers)
+        if (DebugUser)
+          cast<DbgVariableIntrinsic>(DebugUser)->replaceVariableLocationOp(
+              0u, FinalValue);
+    }
+
     // Given LCSSA form is satisfied, we should not have users of instructions
     // within the dead loop outside of the loop. However, LCSSA doesn't take
     // unreachable uses into account. We handle them here.
@@ -630,17 +643,17 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
           U.set(Poison);
         }
 
-        // RemoveDIs: do the same as below for DPValues.
+        // RemoveDIs: do the same as below for DbgVariableRecords.
         if (Block->IsNewDbgInfoFormat) {
-          for (DPValue &DPV : llvm::make_early_inc_range(
-                   DPValue::filter(I.getDbgValueRange()))) {
-            DebugVariable Key(DPV.getVariable(), DPV.getExpression(),
-                              DPV.getDebugLoc().get());
+          for (DbgVariableRecord &DVR : llvm::make_early_inc_range(
+                   filterDbgVars(I.getDbgRecordRange()))) {
+            DebugVariable Key(DVR.getVariable(), DVR.getExpression(),
+                              DVR.getDebugLoc().get());
             if (!DeadDebugSet.insert(Key).second)
               continue;
-            // Unlinks the DPV from it's container, for later insertion.
-            DPV.removeFromParent();
-            DeadDPValues.push_back(&DPV);
+            // Unlinks the DVR from it's container, for later insertion.
+            DVR.removeFromParent();
+            DeadDbgVariableRecords.push_back(&DVR);
           }
         }
 
@@ -672,11 +685,11 @@ void llvm::deleteDeadLoop(Loop *L, DominatorTree *DT, ScalarEvolution *SE,
       DVI->moveBefore(*ExitBlock, InsertDbgValueBefore);
 
     // Due to the "head" bit in BasicBlock::iterator, we're going to insert
-    // each DPValue right at the start of the block, wheras dbg.values would be
-    // repeatedly inserted before the first instruction. To replicate this
-    // behaviour, do it backwards.
-    for (DPValue *DPV : llvm::reverse(DeadDPValues))
-      ExitBlock->insertDPValueBefore(DPV, InsertDbgValueBefore);
+    // each DbgVariableRecord right at the start of the block, wheras dbg.values
+    // would be repeatedly inserted before the first instruction. To replicate
+    // this behaviour, do it backwards.
+    for (DbgVariableRecord *DVR : llvm::reverse(DeadDbgVariableRecords))
+      ExitBlock->insertDbgRecordBefore(DVR, InsertDbgValueBefore);
   }
 
   // Remove the block from the reference counting scheme, so that we can
@@ -1033,15 +1046,6 @@ CmpInst::Predicate llvm::getMinMaxReductionPredicate(RecurKind RK) {
   }
 }
 
-Value *llvm::createAnyOfOp(IRBuilderBase &Builder, Value *StartVal,
-                           RecurKind RK, Value *Left, Value *Right) {
-  if (auto VTy = dyn_cast<VectorType>(Left->getType()))
-    StartVal = Builder.CreateVectorSplat(VTy->getElementCount(), StartVal);
-  Value *Cmp =
-      Builder.CreateCmp(CmpInst::ICMP_NE, Left, StartVal, "rdx.select.cmp");
-  return Builder.CreateSelect(Cmp, Left, Right, "rdx.select");
-}
-
 Value *llvm::createMinMaxOp(IRBuilderBase &Builder, RecurKind RK, Value *Left,
                             Value *Right) {
   Type *Ty = Left->getType();
@@ -1150,16 +1154,13 @@ Value *llvm::createAnyOfTargetReduction(IRBuilderBase &Builder, Value *Src,
     NewVal = SI->getTrueValue();
   }
 
-  // Create a splat vector with the new value and compare this to the vector
-  // we want to reduce.
-  ElementCount EC = cast<VectorType>(Src->getType())->getElementCount();
-  Value *Right = Builder.CreateVectorSplat(EC, InitVal);
-  Value *Cmp =
-      Builder.CreateCmp(CmpInst::ICMP_NE, Src, Right, "rdx.select.cmp");
-
   // If any predicate is true it means that we want to select the new value.
-  Cmp = Builder.CreateOrReduce(Cmp);
-  return Builder.CreateSelect(Cmp, NewVal, InitVal, "rdx.select");
+  Value *AnyOf =
+      Src->getType()->isVectorTy() ? Builder.CreateOrReduce(Src) : Src;
+  // The compares in the loop may yield poison, which propagates through the
+  // bitwise ORs. Freeze it here before the condition is used.
+  AnyOf = Builder.CreateFreeze(AnyOf);
+  return Builder.CreateSelect(AnyOf, NewVal, InitVal, "rdx.select");
 }
 
 Value *llvm::createSimpleTargetReduction(IRBuilderBase &Builder, Value *Src,
@@ -1412,6 +1413,36 @@ static bool checkIsIndPhi(PHINode *Phi, Loop *L, ScalarEvolution *SE,
   return InductionDescriptor::isInductionPHI(Phi, L, SE, ID);
 }
 
+void llvm::addDebugValuesToIncomingValue(BasicBlock *Successor, Value *IndVar,
+                                         PHINode *PN) {
+  SmallVector<DbgVariableIntrinsic *> DbgUsers;
+  findDbgUsers(DbgUsers, IndVar);
+  for (auto *DebugUser : DbgUsers) {
+    // Skip debug-users with variadic variable locations; they will not,
+    // get updated, which is fine as that is the existing behaviour.
+    if (DebugUser->hasArgList())
+      continue;
+    auto *Cloned = cast<DbgVariableIntrinsic>(DebugUser->clone());
+    Cloned->replaceVariableLocationOp(0u, PN);
+    Cloned->insertBefore(*Successor, Successor->getFirstNonPHIIt());
+  }
+}
+
+void llvm::addDebugValuesToLoopVariable(BasicBlock *Successor, Value *ExitValue,
+                                        PHINode *PN) {
+  SmallVector<DbgVariableIntrinsic *> DbgUsers;
+  findDbgUsers(DbgUsers, PN);
+  for (auto *DebugUser : DbgUsers) {
+    // Skip debug-users with variadic variable locations; they will not,
+    // get updated, which is fine as that is the existing behaviour.
+    if (DebugUser->hasArgList())
+      continue;
+    auto *Cloned = cast<DbgVariableIntrinsic>(DebugUser->clone());
+    Cloned->replaceVariableLocationOp(0u, ExitValue);
+    Cloned->insertBefore(*Successor, Successor->getFirstNonPHIIt());
+  }
+}
+
 int llvm::rewriteLoopExitValues(Loop *L, LoopInfo *LI, TargetLibraryInfo *TLI,
                                 ScalarEvolution *SE,
                                 const TargetTransformInfo *TTI,
@@ -1553,6 +1584,10 @@ int llvm::rewriteLoopExitValues(Loop *L, LoopInfo *LI, TargetLibraryInfo *TLI,
           (isa<PHINode>(Inst) || isa<LandingPadInst>(Inst)) ?
           &*Inst->getParent()->getFirstInsertionPt() : Inst;
         RewritePhiSet.emplace_back(PN, i, ExitValue, InsertPt, HighCost);
+
+        // Add debug values for the candidate PHINode incoming value.
+        if (BasicBlock *Successor = ExitBB->getSingleSuccessor())
+          addDebugValuesToIncomingValue(Successor, PN->getIncomingValue(i), PN);
       }
     }
   }
@@ -1611,8 +1646,27 @@ int llvm::rewriteLoopExitValues(Loop *L, LoopInfo *LI, TargetLibraryInfo *TLI,
     // Replace PN with ExitVal if that is legal and does not break LCSSA.
     if (PN->getNumIncomingValues() == 1 &&
         LI->replacementPreservesLCSSAForm(PN, ExitVal)) {
+      addDebugValuesToLoopVariable(PN->getParent(), ExitVal, PN);
       PN->replaceAllUsesWith(ExitVal);
       PN->eraseFromParent();
+    }
+  }
+
+  // If the loop can be deleted and there are no PHIs to be rewritten (there
+  // are no loop live-out values), record debug variables corresponding to the
+  // induction variable with their constant exit-values. Those values will be
+  // inserted by the 'deletion loop' logic.
+  if (LoopCanBeDel && RewritePhiSet.empty()) {
+    if (auto *IndVar = L->getInductionVariable(*SE)) {
+      const SCEV *PNSCEV = SE->getSCEVAtScope(IndVar, L->getParentLoop());
+      if (auto *Const = dyn_cast<SCEVConstant>(PNSCEV)) {
+        Value *FinalIVValue = Const->getValue();
+        if (L->getUniqueExitBlock()) {
+          SmallVector<DbgVariableIntrinsic *> DbgUsers;
+          findDbgUsers(DbgUsers, IndVar);
+          L->preserveDebugInductionVariableInfo(FinalIVValue, DbgUsers);
+        }
+      }
     }
   }
 
@@ -1929,10 +1983,12 @@ llvm::hasPartialIVCondition(const Loop &L, unsigned MSSAThreshold,
   if (!TI || !TI->isConditional())
     return {};
 
-  auto *CondI = dyn_cast<CmpInst>(TI->getCondition());
+  auto *CondI = dyn_cast<Instruction>(TI->getCondition());
   // The case with the condition outside the loop should already be handled
   // earlier.
-  if (!CondI || !L.contains(CondI))
+  // Allow CmpInst and TruncInsts as they may be users of load instructions
+  // and have potential for partial unswitching
+  if (!CondI || !isa<CmpInst, TruncInst>(CondI) || !L.contains(CondI))
     return {};
 
   SmallVector<Instruction *> InstToDuplicate;

@@ -1,5 +1,4 @@
 import os
-import unittest
 
 import dap_server
 import lldbdap_testcase
@@ -7,8 +6,8 @@ from lldbsuite.test import lldbtest, lldbutil
 from lldbsuite.test.decorators import *
 
 
-@unittest.skip("https://llvm.org/PR81686")
 class TestDAP_commands(lldbdap_testcase.DAPTestCaseBase):
+    @skipIfRemote
     def test_command_directive_quiet_on_success(self):
         program = self.getBuildArtifact("a.out")
         command_quiet = (
@@ -62,6 +61,7 @@ class TestDAP_commands(lldbdap_testcase.DAPTestCaseBase):
     def test_command_directive_abort_on_error_pre_run_commands(self):
         self.do_test_abort_on_error(use_pre_run_commands=True)
 
+    @skipIfRemote
     def test_command_directive_abort_on_error_post_run_commands(self):
         self.do_test_abort_on_error(use_post_run_commands=True)
 

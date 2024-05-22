@@ -26,6 +26,7 @@ static_assert(foo[2][2] == nullptr, "");
 static_assert(foo[2][3] == &m, "");
 static_assert(foo[2][4] == nullptr, "");
 
+constexpr int ZeroSizeArray[] = {};
 
 constexpr int SomeInt[] = {1};
 constexpr int getSomeInt() { return *SomeInt; }
@@ -137,6 +138,8 @@ constexpr int dependent[4] = {
 };
 static_assert(dependent[2] == dependent[0], "");
 static_assert(dependent[3] == dependent[1], "");
+
+union { char x[]; } r = {0};
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc99-extensions"
@@ -427,18 +430,13 @@ namespace Incomplete {
                           // both-note {{array-to-pointer decay of array member without known bound}}
 
   /// These are from test/SemaCXX/constant-expression-cxx11.cpp
-  /// and are the only tests using the 'indexing of array without known bound' diagnostic.
-  /// We currently diagnose them differently.
-  extern int arr[]; // expected-note 3{{declared here}}
+  extern int arr[];
   constexpr int *c = &arr[1]; // both-error  {{must be initialized by a constant expression}} \
-                              // ref-note {{indexing of array without known bound}} \
-                              // expected-note {{read of non-constexpr variable 'arr'}}
+                              // both-note {{indexing of array without known bound}}
   constexpr int *d = &arr[1]; // both-error  {{must be initialized by a constant expression}} \
-                              // ref-note {{indexing of array without known bound}} \
-                              // expected-note {{read of non-constexpr variable 'arr'}}
+                              // both-note {{indexing of array without known bound}}
   constexpr int *e = arr + 1; // both-error  {{must be initialized by a constant expression}} \
-                              // ref-note {{indexing of array without known bound}} \
-                              // expected-note {{read of non-constexpr variable 'arr'}}
+                              // both-note {{indexing of array without known bound}}
 }
 
 namespace GH69115 {
@@ -562,5 +560,48 @@ namespace LocalVLA {
      // both-warning@-3 {{variable length array}}
      // both-note@-4 {{function parameter 'size' with unknown value}}
 #endif
+  }
+
+  void f (unsigned int m) {
+    int e[2][m];
+#if __cplusplus >= 202002L
+     // both-note@-3 {{declared here}}
+     // both-warning@-3 2{{variable length array}}
+     // both-note@-4 {{function parameter 'm' with unknown value}}
+#endif
+    e[0][0] = 0;
+  }
+}
+
+char melchizedek[2];
+typedef decltype(melchizedek[1] - melchizedek[0]) ptrdiff_t;
+constexpr ptrdiff_t d1 = &melchizedek[1] - &melchizedek[0]; // ok
+constexpr ptrdiff_t d3 = &melchizedek[0] - &melchizedek[1]; // ok
+
+/// GH#88018
+const int SZA[] = {};
+void testZeroSizedArrayAccess() { unsigned c = SZA[4]; }
+
+#if __cplusplus >= 202002L
+constexpr int test_multiarray2() { // both-error {{never produces a constant expression}}
+  int multi2[2][1]; // both-note {{declared here}}
+  return multi2[2][0]; // both-note {{cannot access array element of pointer past the end of object}} \
+                       // both-warning {{array index 2 is past the end of the array (that has type 'int[2][1]')}}
+}
+
+/// Same but with a dummy pointer.
+int multi22[2][2]; // both-note {{declared here}}
+int test_multiarray22() {
+  return multi22[2][0]; // both-warning {{array index 2 is past the end of the array (that has type 'int[2][2]')}}
+}
+
+#endif
+
+namespace ArrayMemberAccess {
+  struct A {
+    int x;
+  };
+  void f(const A (&a)[]) {
+    bool cond = a->x;
   }
 }
