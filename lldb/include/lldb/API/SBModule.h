@@ -290,6 +290,9 @@ public:
   lldb::SBAddress GetObjectFileHeaderAddress() const;
   lldb::SBAddress GetObjectFileEntryPointAddress() const;
 
+  /// Get if the symbol file for this module is loaded.
+  bool IsDebugInfoLoaded() const;
+
   /// Get the number of global modules.
   static uint32_t GetNumberAllocatedModules();
 
@@ -301,8 +304,11 @@ private:
   friend class SBFrame;
   friend class SBSection;
   friend class SBSymbolContext;
+  friend class SBPlatform;
   friend class SBTarget;
   friend class SBType;
+
+  friend class lldb_private::python::SWIGBridge;
 
   explicit SBModule(const lldb::ModuleSP &module_sp);
 

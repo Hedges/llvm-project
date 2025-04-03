@@ -15,8 +15,6 @@
 #include "lldb/API/SBSymbolContextList.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/Section.h"
-#include "lldb/Core/ValueObjectList.h"
-#include "lldb/Core/ValueObjectVariable.h"
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/SymbolFile.h"
 #include "lldb/Symbol/Symtab.h"
@@ -25,6 +23,8 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/Instrumentation.h"
 #include "lldb/Utility/StreamString.h"
+#include "lldb/ValueObject/ValueObjectList.h"
+#include "lldb/ValueObject/ValueObjectVariable.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -657,6 +657,18 @@ lldb::SBAddress SBModule::GetObjectFileEntryPointAddress() const {
       sb_addr.ref() = objfile_ptr->GetEntryPointAddress();
   }
   return sb_addr;
+}
+
+bool SBModule::IsDebugInfoLoaded() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  ModuleSP module_sp(GetSP());
+  if (module_sp) {
+    SymbolFile *sym_file = module_sp->GetSymbolFile(/*create=*/false);
+    return sym_file && sym_file->GetLoadDebugInfoEnabled();
+  }
+
+  return false;
 }
 
 uint32_t SBModule::GetNumberAllocatedModules() {

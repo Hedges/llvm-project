@@ -43,9 +43,8 @@ public:
   ConstraintSatisfaction() = default;
 
   ConstraintSatisfaction(const NamedDecl *ConstraintOwner,
-                         ArrayRef<TemplateArgument> TemplateArgs) :
-      ConstraintOwner(ConstraintOwner), TemplateArgs(TemplateArgs.begin(),
-                                                     TemplateArgs.end()) { }
+                         ArrayRef<TemplateArgument> TemplateArgs)
+      : ConstraintOwner(ConstraintOwner), TemplateArgs(TemplateArgs) {}
 
   using SubstitutionDiagnostic = std::pair<SourceLocation, StringRef>;
   using Detail = llvm::PointerUnion<Expr *, SubstitutionDiagnostic *>;
@@ -53,11 +52,10 @@ public:
   bool IsSatisfied = false;
   bool ContainsErrors = false;
 
-  /// \brief Pairs of unsatisfied atomic constraint expressions along with the
-  /// substituted constraint expr, if the template arguments could be
+  /// \brief The substituted constraint expr, if the template arguments could be
   /// substituted into them, or a diagnostic if substitution resulted in an
   /// invalid expression.
-  llvm::SmallVector<std::pair<const Expr *, Detail>, 4> Details;
+  llvm::SmallVector<Detail, 4> Details;
 
   void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &C) {
     Profile(ID, C, ConstraintOwner, TemplateArgs);
@@ -69,7 +67,7 @@ public:
 
   bool HasSubstitutionFailure() {
     for (const auto &Detail : Details)
-      if (Detail.second.dyn_cast<SubstitutionDiagnostic *>())
+      if (Detail.dyn_cast<SubstitutionDiagnostic *>())
         return true;
     return false;
   }
@@ -80,9 +78,7 @@ public:
 /// substituted into them, or a diagnostic if substitution resulted in
 /// an invalid expression.
 using UnsatisfiedConstraintRecord =
-    std::pair<const Expr *,
-              llvm::PointerUnion<Expr *,
-                                 std::pair<SourceLocation, StringRef> *>>;
+    llvm::PointerUnion<Expr *, std::pair<SourceLocation, StringRef> *>;
 
 /// \brief The result of a constraint satisfaction check, containing the
 /// necessary information to diagnose an unsatisfied constraint.
@@ -233,12 +229,15 @@ class TypeConstraint {
   /// type-constraint.
   Expr *ImmediatelyDeclaredConstraint = nullptr;
   ConceptReference *ConceptRef;
+  int ArgumentPackSubstitutionIndex;
 
 public:
   TypeConstraint(ConceptReference *ConceptRef,
-                 Expr *ImmediatelyDeclaredConstraint)
+                 Expr *ImmediatelyDeclaredConstraint,
+                 int ArgumentPackSubstitutionIndex)
       : ImmediatelyDeclaredConstraint(ImmediatelyDeclaredConstraint),
-        ConceptRef(ConceptRef) {}
+        ConceptRef(ConceptRef),
+        ArgumentPackSubstitutionIndex(ArgumentPackSubstitutionIndex) {}
 
   /// \brief Get the immediately-declared constraint expression introduced by
   /// this type-constraint, that is - the constraint expression that is added to
@@ -248,6 +247,10 @@ public:
   }
 
   ConceptReference *getConceptReference() const { return ConceptRef; }
+
+  int getArgumentPackSubstitutionIndex() const {
+    return ArgumentPackSubstitutionIndex;
+  }
 
   // FIXME: Instead of using these concept related functions the callers should
   // directly work with the corresponding ConceptReference.

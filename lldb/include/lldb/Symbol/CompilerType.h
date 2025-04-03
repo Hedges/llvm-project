@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "lldb/Utility/Scalar.h"
 #include "lldb/lldb-private.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/Support/Casting.h"
@@ -279,6 +280,8 @@ public:
 
   ConstString GetDisplayTypeName() const;
 
+  ConstString GetMangledTypeName() const;
+
   uint32_t
   GetTypeInfo(CompilerType *pointee_or_element_compiler_type = nullptr) const;
 
@@ -388,9 +391,9 @@ public:
   struct IntegralTemplateArgument;
 
   /// Return the size of the type in bytes.
-  std::optional<uint64_t> GetByteSize(ExecutionContextScope *exe_scope) const;
+  llvm::Expected<uint64_t> GetByteSize(ExecutionContextScope *exe_scope) const;
   /// Return the size of the type in bits.
-  std::optional<uint64_t> GetBitSize(ExecutionContextScope *exe_scope) const;
+  llvm::Expected<uint64_t> GetBitSize(ExecutionContextScope *exe_scope) const;
 
   lldb::Encoding GetEncoding(uint64_t &count) const;
 
@@ -436,7 +439,7 @@ public:
                                    uint32_t *bitfield_bit_size_ptr = nullptr,
                                    bool *is_bitfield_ptr = nullptr) const;
 
-  CompilerType GetChildCompilerTypeAtIndex(
+  llvm::Expected<CompilerType> GetChildCompilerTypeAtIndex(
       ExecutionContext *exe_ctx, size_t idx, bool transparent_pointers,
       bool omit_empty_base_classes, bool ignore_array_bounds,
       std::string &child_name, uint32_t &child_byte_size,
@@ -542,7 +545,7 @@ bool operator==(const CompilerType &lhs, const CompilerType &rhs);
 bool operator!=(const CompilerType &lhs, const CompilerType &rhs);
 
 struct CompilerType::IntegralTemplateArgument {
-  llvm::APSInt value;
+  Scalar value;
   CompilerType type;
 };
 
