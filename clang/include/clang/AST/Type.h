@@ -312,6 +312,12 @@ public:
     return Result;
   }
 
+  std::string getAsString() const;
+  std::string getAsString(const PrintingPolicy &Policy) const;
+
+  bool isEmptyWhenPrinted(const PrintingPolicy &Policy) const;
+  void print(raw_ostream &OS, const PrintingPolicy &Policy) const;
+
   void Profile(llvm::FoldingSetNodeID &ID) const { ID.AddInteger(Data); }
 };
 
@@ -562,7 +568,7 @@ public:
 
   bool hasAddressSpace() const { return Mask & AddressSpaceMask; }
   LangAS getAddressSpace() const {
-    return static_cast<LangAS>(Mask >> AddressSpaceShift);
+    return static_cast<LangAS>((Mask & AddressSpaceMask) >> AddressSpaceShift);
   }
   bool hasTargetSpecificAddressSpace() const {
     return isTargetAddressSpace(getAddressSpace());
@@ -803,6 +809,9 @@ private:
   static_assert(sizeof(PointerAuthQualifier) == sizeof(uint32_t),
                 "PointerAuthQualifier must be 32 bits");
 
+  static constexpr uint64_t PtrAuthShift = 32;
+  static constexpr uint64_t PtrAuthMask = UINT64_C(0xffffffff) << PtrAuthShift;
+
   static constexpr uint64_t UMask = 0x8;
   static constexpr uint64_t UShift = 3;
   static constexpr uint64_t GCAttrMask = 0x30;
@@ -810,10 +819,8 @@ private:
   static constexpr uint64_t LifetimeMask = 0x1C0;
   static constexpr uint64_t LifetimeShift = 6;
   static constexpr uint64_t AddressSpaceMask =
-      ~(CVRMask | UMask | GCAttrMask | LifetimeMask);
+      ~(CVRMask | UMask | GCAttrMask | LifetimeMask | PtrAuthMask);
   static constexpr uint64_t AddressSpaceShift = 9;
-  static constexpr uint64_t PtrAuthShift = 32;
-  static constexpr uint64_t PtrAuthMask = uint64_t(0xffffffff) << PtrAuthShift;
 };
 
 class QualifiersAndAtomic {
@@ -1447,6 +1454,12 @@ public:
 
   PointerAuthQualifier getPointerAuth() const {
     return getQualifiers().getPointerAuth();
+  }
+
+  bool hasAddressDiscriminatedPointerAuth() const {
+    if (PointerAuthQualifier PtrAuth = getPointerAuth())
+      return PtrAuth.isAddressDiscriminated();
+    return false;
   }
 
   enum PrimitiveDefaultInitializeKind {
@@ -2433,6 +2446,26 @@ public:
     return !isFunctionType();
   }
 
+  /// \returns True if the type is incomplete and it is also a type that
+  /// cannot be completed by a later type definition.
+  ///
+  /// E.g. For `void` this is true but for `struct ForwardDecl;` this is false
+  /// because a definition for `ForwardDecl` could be provided later on in the
+  /// translation unit.
+  ///
+  /// Note even for types that this function returns true for it is still
+  /// possible for the declarations that contain this type to later have a
+  /// complete type in a translation unit. E.g.:
+  ///
+  /// \code{.c}
+  /// // This decl has type 'char[]' which is incomplete and cannot be later
+  /// // completed by another by another type declaration.
+  /// extern char foo[];
+  /// // This decl now has complete type 'char[5]'.
+  /// char foo[5]; // foo has a complete type
+  /// \endcode
+  bool isAlwaysIncompleteType() const;
+
   /// Determine whether this type is an object type.
   bool isObjectType() const {
     // C++ [basic.types]p8:
@@ -2760,6 +2793,11 @@ public:
   /// of some sort, e.g., it is a floating-point type or a vector thereof.
   bool hasFloatingRepresentation() const;
 
+  /// Determine whether this type has a boolean representation -- i.e., it is a
+  /// boolean type, an enum type whose underlying type is a boolean type, or a
+  /// vector of booleans.
+  bool hasBooleanRepresentation() const;
+
   // Type Checking Functions: Check to see if this type is structurally the
   // specified type, ignoring typedefs and qualifiers, and return a pointer to
   // the best type we can.
@@ -2820,6 +2858,20 @@ public:
   /// There are some specializations of this member template listed
   /// immediately following this class.
   template <typename T> const T *getAs() const;
+
+  /// Look through sugar for an instance of TemplateSpecializationType which
+  /// is not a type alias, or null if there is no such type.
+  /// This is used when you want as-written template arguments or the template
+  /// name for a class template specialization.
+  const TemplateSpecializationType *
+  getAsNonAliasTemplateSpecializationType() const;
+
+  const TemplateSpecializationType *
+  castAsNonAliasTemplateSpecializationType() const {
+    const auto *TST = getAsNonAliasTemplateSpecializationType();
+    assert(TST && "not a TemplateSpecializationType");
+    return TST;
+  }
 
   /// Member-template getAsAdjusted<specific type>. Look through specific kinds
   /// of sugar (parens, attributes, etc) for an instance of \<specific type>.
@@ -3345,6 +3397,8 @@ public:
   static bool classof(const Type *T) {
     return T->getTypeClass() == CountAttributed;
   }
+
+  StringRef getAttributeName(bool WithMacroPrefix) const;
 };
 
 /// Represents a type which was implicitly adjusted by the semantic
@@ -3823,14 +3877,9 @@ class VariableArrayType : public ArrayType {
   /// a function block.
   Stmt *SizeExpr;
 
-  /// The range spanned by the left and right array brackets.
-  SourceRange Brackets;
-
-  VariableArrayType(QualType et, QualType can, Expr *e,
-                    ArraySizeModifier sm, unsigned tq,
-                    SourceRange brackets)
-      : ArrayType(VariableArray, et, can, sm, tq, e),
-        SizeExpr((Stmt*) e), Brackets(brackets) {}
+  VariableArrayType(QualType et, QualType can, Expr *e, ArraySizeModifier sm,
+                    unsigned tq)
+      : ArrayType(VariableArray, et, can, sm, tq, e), SizeExpr((Stmt *)e) {}
 
 public:
   friend class StmtIteratorBase;
@@ -3840,10 +3889,6 @@ public:
     // to have a dependency of Type.h on Stmt.h/Expr.h.
     return (Expr*) SizeExpr;
   }
-
-  SourceRange getBracketsRange() const { return Brackets; }
-  SourceLocation getLBracketLoc() const { return Brackets.getBegin(); }
-  SourceLocation getRBracketLoc() const { return Brackets.getEnd(); }
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
@@ -3880,12 +3925,8 @@ class DependentSizedArrayType : public ArrayType {
   /// type will have its size deduced from an initializer.
   Stmt *SizeExpr;
 
-  /// The range spanned by the left and right array brackets.
-  SourceRange Brackets;
-
   DependentSizedArrayType(QualType et, QualType can, Expr *e,
-                          ArraySizeModifier sm, unsigned tq,
-                          SourceRange brackets);
+                          ArraySizeModifier sm, unsigned tq);
 
 public:
   friend class StmtIteratorBase;
@@ -3895,10 +3936,6 @@ public:
     // to have a dependency of Type.h on Stmt.h/Expr.h.
     return (Expr*) SizeExpr;
   }
-
-  SourceRange getBracketsRange() const { return Brackets; }
-  SourceLocation getLBracketLoc() const { return Brackets.getBegin(); }
-  SourceLocation getRBracketLoc() const { return Brackets.getEnd(); }
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
@@ -5914,7 +5951,7 @@ public:
 /// of this class via DecltypeType nodes.
 class DependentDecltypeType : public DecltypeType, public llvm::FoldingSetNode {
 public:
-  DependentDecltypeType(Expr *E, QualType UnderlyingTpe);
+  DependentDecltypeType(Expr *E);
 
   void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context) {
     Profile(ID, Context, getUnderlyingExpr());
@@ -5962,7 +5999,7 @@ public:
     return *(getExpansionsPtr() + *getSelectedIndex());
   }
 
-  std::optional<unsigned> getSelectedIndex() const;
+  UnsignedOrNone getSelectedIndex() const;
 
   bool hasSelectedType() const { return getSelectedIndex() != std::nullopt; }
 
@@ -5999,7 +6036,7 @@ private:
 };
 
 /// A unary type transform, which is a type constructed from another.
-class UnaryTransformType : public Type {
+class UnaryTransformType : public Type, public llvm::FoldingSetNode {
 public:
   enum UTTKind {
 #define TRANSFORM_TYPE_TRAIT_DEF(Enum, _) Enum,
@@ -6033,28 +6070,16 @@ public:
   static bool classof(const Type *T) {
     return T->getTypeClass() == UnaryTransform;
   }
-};
-
-/// Internal representation of canonical, dependent
-/// __underlying_type(type) types.
-///
-/// This class is used internally by the ASTContext to manage
-/// canonical, dependent types, only. Clients will only see instances
-/// of this class via UnaryTransformType nodes.
-class DependentUnaryTransformType : public UnaryTransformType,
-                                    public llvm::FoldingSetNode {
-public:
-  DependentUnaryTransformType(const ASTContext &C, QualType BaseType,
-                              UTTKind UKind);
 
   void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getBaseType(), getUTTKind());
+    Profile(ID, getBaseType(), getUnderlyingType(), getUTTKind());
   }
 
   static void Profile(llvm::FoldingSetNodeID &ID, QualType BaseType,
-                      UTTKind UKind) {
-    ID.AddPointer(BaseType.getAsOpaquePtr());
-    ID.AddInteger((unsigned)UKind);
+                      QualType UnderlyingType, UTTKind UKind) {
+    BaseType.Profile(ID);
+    UnderlyingType.Profile(ID);
+    ID.AddInteger(UKind);
   }
 };
 
@@ -6400,7 +6425,7 @@ class SubstTemplateTypeParmType final
   Decl *AssociatedDecl;
 
   SubstTemplateTypeParmType(QualType Replacement, Decl *AssociatedDecl,
-                            unsigned Index, std::optional<unsigned> PackIndex,
+                            unsigned Index, UnsignedOrNone PackIndex,
                             bool Final);
 
 public:
@@ -6428,10 +6453,9 @@ public:
   // sugared: it doesn't need to be resugared later.
   unsigned getFinal() const { return SubstTemplateTypeParmTypeBits.Final; }
 
-  std::optional<unsigned> getPackIndex() const {
-    if (SubstTemplateTypeParmTypeBits.PackIndex == 0)
-      return std::nullopt;
-    return SubstTemplateTypeParmTypeBits.PackIndex - 1;
+  UnsignedOrNone getPackIndex() const {
+    return UnsignedOrNone::fromInternalRepresentation(
+        SubstTemplateTypeParmTypeBits.PackIndex);
   }
 
   bool isSugared() const { return true; }
@@ -6444,7 +6468,7 @@ public:
 
   static void Profile(llvm::FoldingSetNodeID &ID, QualType Replacement,
                       const Decl *AssociatedDecl, unsigned Index,
-                      std::optional<unsigned> PackIndex, bool Final);
+                      UnsignedOrNone PackIndex, bool Final);
 
   static bool classof(const Type *T) {
     return T->getTypeClass() == SubstTemplateTypeParm;
@@ -6673,10 +6697,9 @@ class TemplateSpecializationType : public Type, public llvm::FoldingSetNode {
   /// replacement must, recursively, be one of these).
   TemplateName Template;
 
-  TemplateSpecializationType(TemplateName T,
+  TemplateSpecializationType(TemplateName T, bool IsAlias,
                              ArrayRef<TemplateArgument> Args,
-                             QualType Canon,
-                             QualType Aliased);
+                             QualType Underlying);
 
 public:
   /// Determine whether any of the given template arguments are dependent.
@@ -6744,7 +6767,7 @@ public:
 
   void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Ctx);
   static void Profile(llvm::FoldingSetNodeID &ID, TemplateName T,
-                      ArrayRef<TemplateArgument> Args,
+                      ArrayRef<TemplateArgument> Args, QualType Underlying,
                       const ASTContext &Context);
 
   static bool classof(const Type *T) {
@@ -7142,7 +7165,7 @@ class PackExpansionType : public Type, public llvm::FoldingSetNode {
   QualType Pattern;
 
   PackExpansionType(QualType Pattern, QualType Canon,
-                    std::optional<unsigned> NumExpansions)
+                    UnsignedOrNone NumExpansions)
       : Type(PackExpansion, Canon,
              (Pattern->getDependence() | TypeDependence::Dependent |
               TypeDependence::Instantiation) &
@@ -7160,7 +7183,7 @@ public:
 
   /// Retrieve the number of expansions that this pack expansion will
   /// generate, if known.
-  std::optional<unsigned> getNumExpansions() const {
+  UnsignedOrNone getNumExpansions() const {
     if (PackExpansionTypeBits.NumExpansions)
       return PackExpansionTypeBits.NumExpansions - 1;
     return std::nullopt;
@@ -7174,11 +7197,9 @@ public:
   }
 
   static void Profile(llvm::FoldingSetNodeID &ID, QualType Pattern,
-                      std::optional<unsigned> NumExpansions) {
+                      UnsignedOrNone NumExpansions) {
     ID.AddPointer(Pattern.getAsOpaquePtr());
-    ID.AddBoolean(NumExpansions.has_value());
-    if (NumExpansions)
-      ID.AddInteger(*NumExpansions);
+    ID.AddInteger(NumExpansions.toInternalRepresentation());
   }
 
   static bool classof(const Type *T) {
