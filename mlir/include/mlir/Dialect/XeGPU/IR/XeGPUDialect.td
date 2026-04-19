@@ -36,6 +36,20 @@ def XeGPU_Dialect : Dialect {
 
     let useDefaultTypePrinterParser = true;
     let useDefaultAttributePrinterParser = true;
+
+    let extraClassDeclaration = [{
+      /// drops/slices the shape in the specified dims, and return the rest. e.g.,
+      /// for shape = [32, 64, 8], dims = [0, 2], it will return [64]
+      template<typename T, typename U>
+      static llvm::SmallVector<T> slice(llvm::ArrayRef<T> shape, llvm::ArrayRef<U> dims) {
+        llvm::SmallVector<T> result;
+        for (auto [i, v]: llvm::enumerate(shape)) {
+          if (!llvm::is_contained(dims, i))
+            result.push_back(v);
+        }
+        return result;
+      }
+    }];
 }
 
 #endif // MLIR_DIALECT_XEGPU_IR_XEGPUDIALECT_TD

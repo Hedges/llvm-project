@@ -160,12 +160,20 @@ define void @foo(i32 %v0) {
 
   auto *Int32Ty = sandboxir::Type::getInt32Ty(Ctx);
   auto *LLVMInt32Ty = llvm::Type::getInt32Ty(C);
+  auto *Int32VecTy =
+      sandboxir::VectorType::get(Int32Ty, ElementCount::getFixed(2u));
+  auto *LLVMInt32VecTy = llvm::FixedVectorType::get(LLVMInt32Ty, 2);
   {
     // Check get(Type, V).
     auto *FortyThree = sandboxir::ConstantInt::get(Int32Ty, 43);
     auto *LLVMFortyThree = llvm::ConstantInt::get(LLVMInt32Ty, 43);
     EXPECT_NE(FortyThree, FortyTwo);
     EXPECT_EQ(FortyThree, Ctx.getValue(LLVMFortyThree));
+
+    // Check vector splat.
+    auto *FortyThreeVec = sandboxir::ConstantInt::get(Int32VecTy, 43);
+    auto *LLVMFortyThreeVec = llvm::ConstantInt::get(LLVMInt32VecTy, 43);
+    EXPECT_EQ(FortyThreeVec, Ctx.getValue(LLVMFortyThreeVec));
   }
   {
     // Check get(Type, V, IsSigned).
@@ -268,7 +276,7 @@ define void @foo(i32 %v0) {
       sandboxir::ConstantInt::isValueValidForType(Int32Ty, (int64_t)42));
   // Check isNegative().
   EXPECT_FALSE(FortyTwo->isNegative());
-  EXPECT_TRUE(sandboxir::ConstantInt::get(Int32Ty, -42));
+  EXPECT_TRUE(sandboxir::ConstantInt::getSigned(Int32Ty, -42));
   // Check isZero().
   EXPECT_FALSE(FortyTwo->isZero());
   EXPECT_TRUE(sandboxir::ConstantInt::get(Int32Ty, 0)->isZero());
@@ -277,7 +285,7 @@ define void @foo(i32 %v0) {
   EXPECT_TRUE(sandboxir::ConstantInt::get(Int32Ty, 1)->isOne());
   // Check isMinusOne().
   EXPECT_FALSE(FortyTwo->isMinusOne());
-  EXPECT_TRUE(sandboxir::ConstantInt::get(Int32Ty, -1)->isMinusOne());
+  EXPECT_TRUE(sandboxir::ConstantInt::getSigned(Int32Ty, -1)->isMinusOne());
   // Check isMaxValue().
   EXPECT_FALSE(FortyTwo->isMaxValue(/*Signed=*/true));
   EXPECT_TRUE(
@@ -285,9 +293,9 @@ define void @foo(i32 %v0) {
           ->isMaxValue(/*Signed=*/true));
   // Check isMinValue().
   EXPECT_FALSE(FortyTwo->isMinValue(/*Signed=*/true));
-  EXPECT_TRUE(
-      sandboxir::ConstantInt::get(Int32Ty, std::numeric_limits<int32_t>::min())
-          ->isMinValue(/*Signed=*/true));
+  EXPECT_TRUE(sandboxir::ConstantInt::getSigned(
+                  Int32Ty, std::numeric_limits<int32_t>::min())
+                  ->isMinValue(/*Signed=*/true));
   // Check uge().
   EXPECT_TRUE(FortyTwo->uge(41));
   EXPECT_FALSE(FortyTwo->uge(43));
@@ -622,6 +630,7 @@ define void @foo() {
   %fvector = extractelement <2 x double> <double 0.0, double 1.0>, i32 0
   %string = extractvalue [6 x i8] [i8 72, i8 69, i8 76, i8 76, i8 79, i8 0], 0
   %stringNoNull = extractvalue [5 x i8] [i8 72, i8 69, i8 76, i8 76, i8 79], 0
+  %splat = extractelement <4 x i8> <i8 1, i8 1, i8 1, i8 1>, i32 0
   ret void
 }
 )IR");
@@ -637,6 +646,7 @@ define void @foo() {
   auto *I3 = &*It++;
   auto *I4 = &*It++;
   auto *I5 = &*It++;
+  auto *I6 = &*It++;
   auto *Array = cast<sandboxir::ConstantDataArray>(I0->getOperand(0));
   EXPECT_TRUE(isa<sandboxir::ConstantDataSequential>(Array));
   auto *Vector = cast<sandboxir::ConstantDataVector>(I1->getOperand(0));
@@ -649,6 +659,8 @@ define void @foo() {
   EXPECT_TRUE(isa<sandboxir::ConstantDataArray>(String));
   auto *StringNoNull = cast<sandboxir::ConstantDataArray>(I5->getOperand(0));
   EXPECT_TRUE(isa<sandboxir::ConstantDataArray>(StringNoNull));
+  auto *Splat = cast<sandboxir::ConstantDataVector>(I6->getOperand(0));
+  EXPECT_TRUE(isa<sandboxir::ConstantDataVector>(Splat));
 
   auto *Zero8 = sandboxir::ConstantInt::get(sandboxir::Type::getInt8Ty(Ctx), 0);
   auto *One8 = sandboxir::ConstantInt::get(sandboxir::Type::getInt8Ty(Ctx), 1);
@@ -750,9 +762,74 @@ define void @foo() {
                            llvm::Type::getDoubleTy(C), Elts64))));
   // Check getString().
   EXPECT_EQ(sandboxir::ConstantDataArray::getString(Ctx, "HELLO"), String);
+
   EXPECT_EQ(sandboxir::ConstantDataArray::getString(Ctx, "HELLO",
                                                     /*AddNull=*/false),
             StringNoNull);
+  EXPECT_EQ(
+      sandboxir::ConstantDataArray::getString(Ctx, "HELLO", /*AddNull=*/false),
+      StringNoNull);
+
+  {
+    // Check ConstantDataArray member functions
+    // ----------------------------------------
+    // Check get().
+    SmallVector<uint8_t> Elts8({0u, 1u});
+    SmallVector<uint16_t> Elts16({0u, 1u});
+    SmallVector<uint32_t> Elts32({0u, 1u});
+    SmallVector<uint64_t> Elts64({0u, 1u});
+    SmallVector<float> EltsF32({0.0, 1.0});
+    SmallVector<double> EltsF64({0.0, 1.0});
+    auto *CDV8 = sandboxir::ConstantDataVector::get(Ctx, Elts8);
+    EXPECT_EQ(CDV8, cast<sandboxir::ConstantDataVector>(
+                        Ctx.getValue(llvm::ConstantDataVector::get(C, Elts8))));
+    auto *CDV16 = sandboxir::ConstantDataVector::get(Ctx, Elts16);
+    EXPECT_EQ(CDV16, cast<sandboxir::ConstantDataVector>(Ctx.getValue(
+                         llvm::ConstantDataVector::get(C, Elts16))));
+    auto *CDV32 = sandboxir::ConstantDataVector::get(Ctx, Elts32);
+    EXPECT_EQ(CDV32, cast<sandboxir::ConstantDataVector>(Ctx.getValue(
+                         llvm::ConstantDataVector::get(C, Elts32))));
+    auto *CDVF32 = sandboxir::ConstantDataVector::get(Ctx, EltsF32);
+    EXPECT_EQ(CDVF32, cast<sandboxir::ConstantDataVector>(Ctx.getValue(
+                          llvm::ConstantDataVector::get(C, EltsF32))));
+    auto *CDVF64 = sandboxir::ConstantDataVector::get(Ctx, EltsF64);
+    EXPECT_EQ(CDVF64, cast<sandboxir::ConstantDataVector>(Ctx.getValue(
+                          llvm::ConstantDataVector::get(C, EltsF64))));
+    // Check getRaw().
+    auto *CDVRaw = sandboxir::ConstantDataVector::getRaw(
+        StringRef("HELLO"), 5, sandboxir::Type::getInt8Ty(Ctx));
+    EXPECT_EQ(CDVRaw,
+              cast<sandboxir::ConstantDataVector>(
+                  Ctx.getValue(llvm::ConstantDataVector::getRaw(
+                      StringRef("HELLO"), 5, llvm::Type::getInt8Ty(C)))));
+    // Check getFP().
+    auto *CDVFP16 = sandboxir::ConstantDataVector::getFP(F16Ty, Elts16);
+    EXPECT_EQ(CDVFP16, cast<sandboxir::ConstantDataVector>(
+                           Ctx.getValue(llvm::ConstantDataVector::getFP(
+                               llvm::Type::getHalfTy(C), Elts16))));
+    auto *CDVFP32 = sandboxir::ConstantDataVector::getFP(F32Ty, Elts32);
+    EXPECT_EQ(CDVFP32, cast<sandboxir::ConstantDataVector>(
+                           Ctx.getValue(llvm::ConstantDataVector::getFP(
+                               llvm::Type::getFloatTy(C), Elts32))));
+    auto *CDVFP64 = sandboxir::ConstantDataVector::getFP(F64Ty, Elts64);
+    EXPECT_EQ(CDVFP64, cast<sandboxir::ConstantDataVector>(
+                           Ctx.getValue(llvm::ConstantDataVector::getFP(
+                               llvm::Type::getDoubleTy(C), Elts64))));
+    // Check getSplat().
+    auto *NewSplat = cast<sandboxir::ConstantDataVector>(
+        sandboxir::ConstantDataVector::getSplat(4, One8));
+    EXPECT_EQ(NewSplat, Splat);
+    // Check isSplat().
+    EXPECT_TRUE(NewSplat->isSplat());
+    EXPECT_FALSE(Vector->isSplat());
+    // Check getSplatValue().
+    EXPECT_EQ(NewSplat->getSplatValue(), One8);
+    // Check getType().
+    EXPECT_TRUE(isa<sandboxir::FixedVectorType>(NewSplat->getType()));
+    EXPECT_EQ(
+        cast<sandboxir::FixedVectorType>(NewSplat->getType())->getNumElements(),
+        4u);
+  }
 }
 
 TEST_F(SandboxIRTest, ConstantPointerNull) {
@@ -982,29 +1059,6 @@ define void @foo() {
   auto *Call = cast<sandboxir::CallInst>(&*It++);
   // Check classof(), creation.
   auto *GO = cast<sandboxir::GlobalObject>(Call->getCalledOperand());
-  // Check getAlignment().
-  EXPECT_EQ(GO->getAlignment(), LLVMGO->getAlignment());
-  // Check getAlign().
-  EXPECT_EQ(GO->getAlign(), LLVMGO->getAlign());
-  // Check setAlignment().
-  auto OrigMaybeAlign = GO->getAlign();
-  auto NewMaybeAlign = MaybeAlign(128);
-  EXPECT_NE(NewMaybeAlign, OrigMaybeAlign);
-  GO->setAlignment(NewMaybeAlign);
-  EXPECT_EQ(GO->getAlign(), NewMaybeAlign);
-  GO->setAlignment(OrigMaybeAlign);
-  EXPECT_EQ(GO->getAlign(), OrigMaybeAlign);
-  // Check getGlobalObjectSubClassData().
-  EXPECT_EQ(GO->getGlobalObjectSubClassData(),
-            LLVMGO->getGlobalObjectSubClassData());
-  // Check setGlobalObjectSubClassData().
-  auto OrigGOSCD = GO->getGlobalObjectSubClassData();
-  auto NewGOSCD = 1u;
-  EXPECT_NE(NewGOSCD, OrigGOSCD);
-  GO->setGlobalObjectSubClassData(NewGOSCD);
-  EXPECT_EQ(GO->getGlobalObjectSubClassData(), NewGOSCD);
-  GO->setGlobalObjectSubClassData(OrigGOSCD);
-  EXPECT_EQ(GO->getGlobalObjectSubClassData(), OrigGOSCD);
   // Check hasSection().
   EXPECT_EQ(GO->hasSection(), LLVMGO->hasSection());
   // Check getSection().
@@ -1215,6 +1269,16 @@ define void @foo() {
   EXPECT_EQ(GV0->getCodeModelRaw(), LLVMGV0->getCodeModelRaw());
   // Check getCodeModel().
   EXPECT_EQ(GV0->getCodeModel(), LLVMGV0->getCodeModel());
+  // Check getAlign().
+  EXPECT_EQ(GV0->getAlign(), LLVMGV0->getAlign());
+  // Check setAlignment().
+  auto OrigMaybeAlign = GV0->getAlign();
+  auto NewMaybeAlign = MaybeAlign(128);
+  EXPECT_NE(NewMaybeAlign, OrigMaybeAlign);
+  GV0->setAlignment(NewMaybeAlign);
+  EXPECT_EQ(GV0->getAlign(), NewMaybeAlign);
+  GV0->setAlignment(OrigMaybeAlign);
+  EXPECT_EQ(GV0->getAlign(), OrigMaybeAlign);
 }
 
 TEST_F(SandboxIRTest, GlobalAlias) {
@@ -1329,7 +1393,7 @@ define ptr @foo() {
   // Check get(), getKey(), getDiscriminator(), getAddrDiscriminator().
   auto *NewPtrAuth = sandboxir::ConstantPtrAuth::get(
       &F, PtrAuth->getKey(), PtrAuth->getDiscriminator(),
-      PtrAuth->getAddrDiscriminator());
+      PtrAuth->getAddrDiscriminator(), PtrAuth->getDeactivationSymbol());
   EXPECT_EQ(NewPtrAuth, PtrAuth);
   // Check hasAddressDiscriminator().
   EXPECT_EQ(PtrAuth->hasAddressDiscriminator(),
@@ -1778,7 +1842,7 @@ define void @foo1() {
     EXPECT_EQ(Buff, R"IR(
 void @foo0(i32 %arg0, i32 %arg1) {
 bb0:
-  br label %bb1 ; SB4. (Br)
+  br label %bb1 ; SB4. (UncondBr)
 
 bb1:
   ret void ; SB6. (Ret)
@@ -1786,6 +1850,17 @@ bb1:
 )IR");
   }
 #endif // NDEBUG
+
+  // Check getAlign().
+  EXPECT_EQ(F0->getAlign(), F0->getAlign());
+  // Check setAlignment().
+  auto OrigMaybeAlign = F0->getAlign();
+  auto NewMaybeAlign = MaybeAlign(128);
+  EXPECT_NE(NewMaybeAlign, OrigMaybeAlign);
+  F0->setAlignment(NewMaybeAlign);
+  EXPECT_EQ(F0->getAlign(), NewMaybeAlign);
+  F0->setAlignment(OrigMaybeAlign);
+  EXPECT_EQ(F0->getAlign(), OrigMaybeAlign);
 }
 
 TEST_F(SandboxIRTest, Module) {
@@ -1908,7 +1983,7 @@ bb1:
     BB0.dumpOS(BS);
     EXPECT_EQ(Buff, R"IR(
 bb0:
-  br label %bb1 ; SB3. (Br)
+  br label %bb1 ; SB3. (UncondBr)
 )IR");
   }
 #endif // NDEBUG
@@ -2272,7 +2347,7 @@ define void @foo(i1 %c0, i8 %v0, i8 %v1, i1 %c1) {
     auto *False = sandboxir::ConstantInt::get(sandboxir::Type::getInt1Ty(Ctx),
                                               0, /*IsSigned=*/false);
     auto *FortyTwo =
-        sandboxir::ConstantInt::get(sandboxir::Type::getInt1Ty(Ctx), 42,
+        sandboxir::ConstantInt::get(sandboxir::Type::getInt32Ty(Ctx), 42,
                                     /*IsSigned=*/false);
     auto *NewSel = sandboxir::SelectInst::create(False, FortyTwo, FortyTwo,
                                                  Ret->getIterator(), Ctx);
@@ -3023,11 +3098,7 @@ define void @foo(i1 %cond0, i1 %cond2) {
       Ctx.getValue(getBasicBlockByName(*LLVMF, "bb2")));
   auto *Ret2 = BB2->getTerminator();
   auto It = BB0->begin();
-  auto *Br0 = cast<sandboxir::BranchInst>(&*It++);
-  // Check isUnconditional().
-  EXPECT_FALSE(Br0->isUnconditional());
-  // Check isConditional().
-  EXPECT_TRUE(Br0->isConditional());
+  auto *Br0 = cast<sandboxir::CondBrInst>(&*It++);
   // Check getCondition().
   EXPECT_EQ(Br0->getCondition(), Cond0);
   // Check setCondition().
@@ -3036,27 +3107,29 @@ define void @foo(i1 %cond0, i1 %cond2) {
   // Check getNumSuccessors().
   EXPECT_EQ(Br0->getNumSuccessors(), 2u);
   // Check getSuccessor().
-  EXPECT_EQ(Br0->getSuccessor(0), BB1);
-  EXPECT_EQ(Br0->getSuccessor(1), BB2);
+  EXPECT_EQ(cast<sandboxir::CondBrInst>(Br0)->getSuccessor(0), BB1);
+  EXPECT_EQ(cast<sandboxir::CondBrInst>(Br0)->getSuccessor(1), BB2);
   // Check swapSuccessors().
   Br0->swapSuccessors();
-  EXPECT_EQ(Br0->getSuccessor(0), BB2);
-  EXPECT_EQ(Br0->getSuccessor(1), BB1);
+  EXPECT_EQ(cast<sandboxir::CondBrInst>(Br0)->getSuccessor(0), BB2);
+  EXPECT_EQ(cast<sandboxir::CondBrInst>(Br0)->getSuccessor(1), BB1);
   // Check successors().
   EXPECT_EQ(range_size(Br0->successors()), 2u);
   unsigned SuccIdx = 0;
-  SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB1, BB2});
+  SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB2, BB1});
   for (sandboxir::BasicBlock *Succ : Br0->successors())
     EXPECT_EQ(Succ, ExpectedSuccs[SuccIdx++]);
 
   {
-    // Check unconditional BranchInst::create() InsertBefore.
-    auto *Br = sandboxir::BranchInst::create(BB1, Ret1->getIterator(), Ctx);
-    EXPECT_FALSE(Br->isConditional());
-    EXPECT_TRUE(Br->isUnconditional());
-#ifndef NDEBUG
-    EXPECT_DEATH(Br->getCondition(), ".*condition.*");
-#endif // NDEBUG
+    // Check UncondBrInst::create() InsertBefore.
+    auto *Br = sandboxir::UncondBrInst::create(BB1, Ret1->getIterator(), Ctx);
+    EXPECT_EQ(Br->getSuccessor(), BB1);
+    // Check UncondBrInst::setSuccessor().
+    EXPECT_EQ(Br->getSuccessor(), BB1);
+    Br->setSuccessor(BB2);
+    EXPECT_EQ(Br->getSuccessor(), BB2);
+    Br->setSuccessor(BB1);
+
     unsigned SuccIdx = 0;
     SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB1});
     for (sandboxir::BasicBlock *Succ : Br->successors())
@@ -3064,13 +3137,8 @@ define void @foo(i1 %cond0, i1 %cond2) {
     EXPECT_EQ(Br->getNextNode(), Ret1);
   }
   {
-    // Check unconditional BranchInst::create() InsertAtEnd.
-    auto *Br = sandboxir::BranchInst::create(BB1, /*InsertAtEnd=*/BB1, Ctx);
-    EXPECT_FALSE(Br->isConditional());
-    EXPECT_TRUE(Br->isUnconditional());
-#ifndef NDEBUG
-    EXPECT_DEATH(Br->getCondition(), ".*condition.*");
-#endif // NDEBUG
+    // Check UncondBrInst::create() InsertAtEnd.
+    auto *Br = sandboxir::UncondBrInst::create(BB1, /*InsertAtEnd=*/BB1, Ctx);
     unsigned SuccIdx = 0;
     SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB1});
     for (sandboxir::BasicBlock *Succ : Br->successors())
@@ -3078,25 +3146,38 @@ define void @foo(i1 %cond0, i1 %cond2) {
     EXPECT_EQ(Br->getPrevNode(), Ret1);
   }
   {
-    // Check conditional BranchInst::create() InsertBefore.
-    auto *Br = sandboxir::BranchInst::create(BB1, BB2, Cond0,
+    // Check CondBrInst::create() InsertBefore.
+    auto *Br = sandboxir::CondBrInst::create(Cond0, BB1, BB2,
                                              Ret1->getIterator(), Ctx);
-    EXPECT_TRUE(Br->isConditional());
     EXPECT_EQ(Br->getCondition(), Cond0);
+
+    // Check CondBrInst::setSuccessor().
+    EXPECT_EQ(Br->getSuccessor(0), BB1);
+    EXPECT_EQ(Br->getSuccessor(1), BB2);
+    Br->setSuccessor(0, BB2);
+    EXPECT_EQ(Br->getSuccessor(0), BB2);
+    EXPECT_EQ(Br->getSuccessor(1), BB2);
+    Br->setSuccessor(1, BB1);
+    EXPECT_EQ(Br->getSuccessor(0), BB2);
+    EXPECT_EQ(Br->getSuccessor(1), BB1);
+    Br->setSuccessor(0, BB1);
+    Br->setSuccessor(1, BB2);
+    EXPECT_EQ(Br->getSuccessor(0), BB1);
+    EXPECT_EQ(Br->getSuccessor(1), BB2);
+
     unsigned SuccIdx = 0;
-    SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB2, BB1});
+    SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB1, BB2});
     for (sandboxir::BasicBlock *Succ : Br->successors())
       EXPECT_EQ(Succ, ExpectedSuccs[SuccIdx++]);
     EXPECT_EQ(Br->getNextNode(), Ret1);
   }
   {
-    // Check conditional BranchInst::create() InsertAtEnd.
-    auto *Br = sandboxir::BranchInst::create(BB1, BB2, Cond0,
+    // Check CondBrInst::create() InsertAtEnd.
+    auto *Br = sandboxir::CondBrInst::create(Cond0, BB1, BB2,
                                              /*InsertAtEnd=*/BB2, Ctx);
-    EXPECT_TRUE(Br->isConditional());
     EXPECT_EQ(Br->getCondition(), Cond0);
     unsigned SuccIdx = 0;
-    SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB2, BB1});
+    SmallVector<sandboxir::BasicBlock *> ExpectedSuccs({BB1, BB2});
     for (sandboxir::BasicBlock *Succ : Br->successors())
       EXPECT_EQ(Succ, ExpectedSuccs[SuccIdx++]);
     EXPECT_EQ(Br->getPrevNode(), Ret2);
@@ -5800,7 +5881,7 @@ bb5:
   auto It = BB2->begin();
   // Check classof().
   auto *PHI = cast<sandboxir::PHINode>(&*It++);
-  auto *Br = cast<sandboxir::BranchInst>(&*It++);
+  auto *Br = cast<sandboxir::UncondBrInst>(&*It++);
   // Check blocks().
   EXPECT_EQ(range_size(PHI->blocks()), range_size(LLVMPHI->blocks()));
   auto BlockIt = PHI->block_begin();
@@ -5888,17 +5969,15 @@ bb5:
            PHI->getIncomingBlock(Idx) == RemoveBB1;
   });
   EXPECT_EQ(PHI->getNumIncomingValues(), 3u);
-  EXPECT_EQ(PHI->getIncomingBlock(0), RemainBB0);
-  EXPECT_EQ(PHI->getIncomingBlock(1), RemainBB1);
-  EXPECT_EQ(PHI->getIncomingBlock(2), RemainBB2);
+  EXPECT_THAT(PHI->blocks(),
+              ::testing::UnorderedElementsAre(RemainBB0, RemainBB1, RemainBB2));
   // Check replaceIncomingBlockWith
   OrigBB = RemainBB0;
   auto *NewBB = RemainBB1;
   EXPECT_NE(NewBB, OrigBB);
   PHI->replaceIncomingBlockWith(OrigBB, NewBB);
-  EXPECT_EQ(PHI->getIncomingBlock(0), NewBB);
-  EXPECT_EQ(PHI->getIncomingBlock(1), RemainBB1);
-  EXPECT_EQ(PHI->getIncomingBlock(2), RemainBB2);
+  EXPECT_THAT(PHI->blocks(),
+              ::testing::UnorderedElementsAre(NewBB, RemainBB1, RemainBB2));
   // Check create().
   auto *NewPHI = cast<sandboxir::PHINode>(sandboxir::PHINode::create(
       PHI->getType(), 0, Br->getIterator(), Ctx, "NewPHI"));
